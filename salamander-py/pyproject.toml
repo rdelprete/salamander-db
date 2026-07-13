@@ -1,0 +1,27 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "salamander-db"
+version = "0.1.0"
+description = "SQLite for event-sourced state — Python bindings for salamander-db."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["event-sourcing", "embedded", "database", "agent"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+]
+
+[project.urls]
+Repository = "https://github.com/rdelprete/salamander-db"
+
+[tool.maturin]
+# The Rust cdylib lib is named `salamander`, which is the Python import name;
+# the distribution ("salamander-db") differs, mirroring the Rust package/lib
+# split. abi3 gives one wheel across CPython 3.9+.
+module-name = "salamander"
+features = ["pyo3/extension-module"]

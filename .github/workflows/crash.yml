@@ -1,0 +1,25 @@
+name: Crash harness (M4 conscience test)
+
+on:
+  schedule:
+    - cron: "0 7 * * *"  # nightly
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: "Number of kill-9 iterations"
+        required: false
+        default: "200"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  crash-loop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release -p salamander-demo
+      - run: |
+          chmod +x scripts/crash_loop.sh
+          scripts/crash_loop.sh "${{ github.event.inputs.iterations || '200' }}"

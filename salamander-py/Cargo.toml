@@ -1,0 +1,21 @@
+[package]
+name = "salamander-py"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Python bindings for salamander-db — SQLite for event-sourced state."
+publish = false
+
+[lib]
+# The Python import name is `salamander`. The Rust dependency (also lib
+# `salamander`) is renamed to `salamander_db` below to avoid the clash.
+name = "salamander"
+crate-type = ["cdylib"]
+
+[dependencies]
+salamander_db = { package = "salamander-db", path = "../salamander" }
+serde_json = "1"
+
+[dependencies.pyo3]
+version = "0.24"
+features = ["abi3-py39", "extension-module"]

@@ -1,0 +1,49 @@
+[package]
+name = "salamander-db"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Embedded event-sourcing engine with instant recovery — the append-only log is the only durable structure."
+readme = "README.md"
+documentation = "https://docs.rs/salamander-db"
+homepage = "https://github.com/rdelprete/salamander-db"
+keywords = ["event-sourcing", "embedded", "database", "wal", "agent"]
+categories = ["database-implementations", "data-structures"]
+rust-version = "1.74"
+
+[lib]
+name = "salamander"
+path = "src/lib.rs"
+
+[dependencies]
+crc32c = "0.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1.3"
+thiserror = "1"
+
+[dev-dependencies]
+proptest = "1"
+criterion = "0.5"
+tempfile = "3"
+
+[[bench]]
+name = "open_time"
+harness = false
+
+[[bench]]
+name = "view_apply"
+harness = false
+
+[[bench]]
+name = "replay"
+harness = false
+
+[[bench]]
+name = "snapshots"
+harness = false
+
+[[bench]]
+name = "instant_recovery"
+harness = false

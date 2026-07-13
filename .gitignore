@@ -1,0 +1,18 @@
+/target
+salamander-py/target/
+# Cargo.lock is committed: the workspace ships binaries (demo, benches) and
+# reproducible CI/crash-harness runs matter more than lockfile churn.
+*.seg
+manifest.json
+LOCK
+.DS_Store
+# Local playground data dirs
+salamander-playground/
+
+# Python (salamander-py bindings)
+__pycache__/
+*.pyc
+.pytest_cache/
+*.pyd
+*.so
+.venv/

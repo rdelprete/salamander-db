@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = ["salamander", "salamander-demo"]
+# The Python extension is built by maturin, not the main gate — it links
+# libpython and only makes sense inside a Python build. Excluding it keeps
+# `cargo build/test/clippy` at the root pure Rust.
+exclude = ["salamander-py"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/rdelprete/salamander-db"

@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SalamanderDB Playground</title>
+<style>
+  :root {
+    --bg: #14161a; --panel: #1d2026; --line: #2c313a;
+    --text: #e6e9ee; --dim: #8a93a3; --accent: #ff7a45; --accent2: #58a6ff;
+    --ok: #4caf7d; --err: #e5534b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+  }
+  header {
+    display: flex; align-items: baseline; gap: 12px;
+    padding: 14px 20px; border-bottom: 1px solid var(--line);
+  }
+  header h1 { font-size: 16px; margin: 0; }
+  header h1 span { color: var(--accent); }
+  header .head-count { color: var(--dim); font-size: 13px; }
+  main {
+    display: grid; grid-template-columns: 240px 1fr; gap: 0;
+    max-width: 1060px; margin: 0 auto;
+  }
+  @media (max-width: 760px) { main { grid-template-columns: 1fr; } }
+
+  #branches { border-right: 1px solid var(--line); padding: 16px; }
+  #branches h2, #timeline h2 { font-size: 12px; text-transform: uppercase;
+    letter-spacing: .08em; color: var(--dim); margin: 0 0 10px; }
+  .branch {
+    display: block; width: 100%; text-align: left; cursor: pointer;
+    background: none; border: 1px solid transparent; border-radius: 6px;
+    color: var(--text); padding: 6px 8px; margin: 2px 0; font: inherit;
+  }
+  .branch:hover { border-color: var(--line); }
+  .branch.active { background: var(--panel); border-color: var(--accent); }
+  .branch .meta { color: var(--dim); font-size: 12px; display: block; }
+
+  #content { padding: 16px 20px 60px; min-width: 0; }
+  form#append {
+    display: grid; grid-template-columns: 180px 1fr auto; gap: 8px;
+    margin-bottom: 18px;
+  }
+  input, textarea, button {
+    background: var(--panel); color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 8px 10px; font: inherit;
+  }
+  textarea { font-family: ui-monospace, Consolas, monospace; resize: vertical;
+    min-height: 38px; }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent);
+    color: #1a1a1a; font-weight: 600; }
+  button:disabled { opacity: .5; cursor: default; }
+  #error { color: var(--err); min-height: 20px; margin: 4px 0 10px;
+    font-size: 13px; }
+
+  #scrubber { display: flex; align-items: center; gap: 12px; margin: 6px 0 14px; }
+  #scrubber input[type=range] { flex: 1; accent-color: var(--accent); padding: 0; }
+  #scrubber .label { color: var(--dim); font-size: 13px; white-space: nowrap; }
+
+  .event {
+    display: grid; grid-template-columns: 64px 1fr; gap: 10px;
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px 12px; margin: 6px 0;
+  }
+  .event.future { opacity: .28; }
+  .event .pos { color: var(--accent2); font-family: ui-monospace, monospace; }
+  .event .inherited-badge { display: inline-block; font-size: 11px;
+    color: var(--dim); border: 1px solid var(--line); border-radius: 4px;
+    padding: 0 5px; margin-left: 6px; }
+  .event .stream { color: var(--ok); }
+  .event .time { color: var(--dim); font-size: 12px; float: right; }
+  .event pre { margin: 4px 0 0; color: var(--text);
+    font: 12px/1.5 ui-monospace, Consolas, monospace;
+    white-space: pre-wrap; word-break: break-word; }
+  #empty { color: var(--dim); padding: 30px 0; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1><span>Salamander</span>DB playground</h1>
+  <div class="head-count">log head: <b id="head">…</b></div>
+</header>
+<main>
+  <nav id="branches">
+    <h2>Branches</h2>
+    <div id="branch-list"></div>
+  </nav>
+  <section id="content">
+    <form id="append">
+      <input id="stream" placeholder="stream (e.g. session-1)" value="session-1">
+      <textarea id="payload" spellcheck="false">{"kind": "note", "text": "hello"}</textarea>
+      <button class="primary" type="submit">Append</button>
+    </form>
+    <div id="error"></div>
+
+    <div id="timeline">
+      <h2>Timeline</h2>
+      <div id="scrubber">
+        <span class="label">time travel</span>
+        <input type="range" id="slider" min="0" max="0" value="0">
+        <span class="label" id="slider-label"></span>
+        <button id="fork">Fork here</button>
+      </div>
+      <div id="events"></div>
+      <div id="empty" hidden>No events yet — append one above.</div>
+    </div>
+  </section>
+</main>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+let state = { head: 0, branches: [] };
+let events = [];
+let selected = null;          // branch id (hex) or null = default
+let forkPositions = new Set(); // fork points of children of the selected branch
+
+async function api(path, body) {
+  const options = body
+    ? { method: "POST", body: JSON.stringify(body) }
+    : undefined;
+  const response = await fetch(path, options);
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || response.statusText);
+  return data;
+}
+
+function defaultBranch() {
+  return state.branches.find((b) => !b.parent) || null;
+}
+
+function selectedId() {
+  return selected ?? (defaultBranch() ? defaultBranch().id : null);
+}
+
+async function refresh(keepSlider = false) {
+  state = await api("/api/state");
+  $("head").textContent = state.head;
+  const branch = selectedId();
+  const data = branch
+    ? await api(`/api/events?branch=${branch}`)
+    : { events: [] };
+  events = data.events;
+  forkPositions = new Set(
+    state.branches
+      .filter((b) => b.parent === branch && b.fork_position != null)
+      .map((b) => b.fork_position)
+  );
+  renderBranches();
+  const slider = $("slider");
+  const atEnd = !keepSlider || Number(slider.value) === Number(slider.max);
+  slider.max = events.length;
+  if (atEnd) slider.value = events.length;
+  renderTimeline();
+}
+
+function renderBranches() {
+  const list = $("branch-list");
+  list.innerHTML = "";
+  const current = selectedId();
+  const byParent = new Map();
+  for (const b of state.branches) {
+    const key = b.parent || "";
+    if (!byParent.has(key)) byParent.set(key, []);
+    byParent.get(key).push(b);
+  }
+  const walk = (parentKey, depth) => {
+    for (const b of byParent.get(parentKey) || []) {
+      const button = document.createElement("button");
+      button.className = "branch" + (b.id === current ? " active" : "");
+      button.style.marginLeft = `${depth * 14}px`;
+      const meta = b.fork_position != null
+        ? `forked @ ${b.fork_position}` : "default branch";
+      button.innerHTML =
+        `<b>${escapeHtml(b.name)}</b><span class="meta">${meta}</span>`;
+      button.onclick = () => { selected = b.id; refresh(); };
+      list.appendChild(button);
+      walk(b.id, depth + 1);
+    }
+  };
+  walk("", 0);
+}
+
+function renderTimeline() {
+  const kept = Number($("slider").value);
+  const container = $("events");
+  container.innerHTML = "";
+  $("empty").hidden = events.length > 0;
+  const branch = selectedId();
+
+  events.forEach((event, index) => {
+    const div = document.createElement("div");
+    div.className = "event" + (index >= kept ? " future" : "");
+    const inherited = event.branch !== branch
+      ? '<span class="inherited-badge">inherited</span>' : "";
+    const time = event.timestamp_ms
+      ? new Date(event.timestamp_ms).toLocaleTimeString() : "";
+    div.innerHTML =
+      `<div class="pos">#${event.position}</div>
+       <div>
+         <span class="stream">${escapeHtml(event.stream)}</span>${inherited}
+         <span class="time">${time}</span>
+         <pre>${escapeHtml(JSON.stringify(event.payload, null, 1))}</pre>
+       </div>`;
+    container.appendChild(div);
+  });
+
+  const label = kept === events.length
+    ? `live (${events.length} events)`
+    : `as of ${kept}/${events.length}`;
+  $("slider-label").textContent = label;
+}
+
+function escapeHtml(text) {
+  const div = document.createElement("div");
+  div.textContent = String(text);
+  return div.innerHTML;
+}
+
+$("append").onsubmit = async (submit) => {
+  submit.preventDefault();
+  $("error").textContent = "";
+  try {
+    const payload = JSON.parse($("payload").value);
+    await api("/api/append", {
+      stream: $("stream").value.trim(),
+      payload,
+      branch: selectedId(),
+    });
+    await refresh();
+  } catch (error) {
+    $("error").textContent = error.message;
+  }
+};
+
+$("slider").oninput = () => renderTimeline();
+
+$("fork").onclick = async () => {
+  $("error").textContent = "";
+  const kept = Number($("slider").value);
+  const at = kept < events.length ? events[kept].position : state.head;
+  const name = prompt(`Fork "${nameOf(selectedId())}" at position ${at} — name for the new branch?`);
+  if (!name) return;
+  try {
+    const { branch } = await api("/api/fork", { branch: selectedId(), at, name });
+    selected = branch.id;
+    await refresh();
+  } catch (error) {
+    $("error").textContent = error.message;
+  }
+};
+
+function nameOf(id) {
+  const branch = state.branches.find((b) => b.id === id);
+  return branch ? branch.name : "main";
+}
+
+refresh().catch((error) => { $("error").textContent = error.message; });
+</script>
+</body>
+</html>
