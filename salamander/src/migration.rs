@@ -17,20 +17,32 @@ use crate::{BranchInfo, BranchName, BranchStatus, OwnedStoredRecord, Result, Sal
 const COMPLETE_FILE: &str = "migration.complete.json";
 const LEGACY_HEADER_LEN: usize = 16;
 
+/// Outcome of a v1-to-v2 import, returned by [`migrate_v1`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MigrationReport {
+    /// Records read from the v1 source.
     pub source_records: u64,
+    /// Records already present in the destination from a prior run.
     pub previously_imported: u64,
+    /// Records imported by this run.
     pub newly_imported: u64,
+    /// The destination's head after the import.
     pub destination_head: u64,
 }
 
+/// Outcome of a legacy-fork-marker conversion, returned by
+/// [`migrate_legacy_branches`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BranchMigrationReport {
+    /// Records read from the source.
     pub source_records: u64,
+    /// Records rewritten into the destination.
     pub migrated_records: u64,
+    /// Legacy fork-marker records dropped during conversion.
     pub removed_marker_records: u64,
+    /// Engine-owned branches created from the markers.
     pub branches_created: u64,
+    /// The destination's head after the conversion.
     pub destination_head: u64,
 }
 
@@ -343,6 +355,11 @@ struct LegacyEvent {
     body: Vec<u8>,
 }
 
+/// Imports a v1 database directory into a fresh v2 directory offline.
+///
+/// The import is resumable and verified: imported events receive
+/// deterministic IDs derived from the source identity and offset, so a
+/// repeated run is idempotent and produces an identical result.
 pub fn migrate_v1(
     source: impl AsRef<Path>,
     destination: impl AsRef<Path>,

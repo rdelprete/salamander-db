@@ -12,50 +12,83 @@ use super::{EventBody, Role};
 use crate::event::Event;
 use crate::projection::{NamespaceScoped, Projection};
 
+/// One entry in a session's reconstructed transcript, in application
+/// order.
 #[derive(Debug, Clone)]
 pub enum TranscriptEntry {
+    /// A conversational turn.
     ModelTurn {
+        /// Who produced the turn.
         role: Role,
+        /// The turn's text content.
         content: String,
+        /// The model that produced it.
         model: String,
     },
+    /// A tool invocation.
     ToolCall {
+        /// Correlates this call with its result.
         call_id: String,
+        /// Name of the tool invoked.
         tool: String,
+        /// JSON-encoded arguments.
         args_json: String,
     },
+    /// The result of a tool invocation.
     ToolResult {
+        /// The `call_id` of the originating call.
         call_id: String,
+        /// Whether the call succeeded.
         ok: bool,
+        /// The result content.
         content: String,
     },
+    /// A recorded decision.
     Decision {
+        /// One-line summary.
         summary: String,
+        /// Why it was made.
         rationale: String,
     },
 }
 
+/// The lifecycle status of a session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionStatus {
+    /// No `SessionStarted` event has been seen for this namespace.
     NotStarted,
+    /// The session has started and not yet ended.
     Active,
-    Ended { reason: String },
+    /// The session has ended.
+    Ended {
+        /// Why the session ended.
+        reason: String,
+    },
 }
 
+/// A tool call awaiting its result, keyed by `call_id` in
+/// [`SessionState::pending`].
 #[derive(Debug, Clone)]
 pub struct PendingToolCall {
+    /// Name of the tool invoked.
     pub tool: String,
+    /// JSON-encoded arguments.
     pub args_json: String,
 }
 
+/// The derived state of one agent session: its transcript, outstanding
+/// tool calls, and status.
 #[derive(Debug)]
 pub struct SessionState {
     /// Set from this session's own `SessionStarted` event, if it's been
     /// applied yet. `None` until then (or for a namespace that never
     /// started a session at all).
     pub agent_id: Option<String>,
+    /// The reconstructed transcript in application order.
     pub transcript: Vec<TranscriptEntry>,
+    /// Tool calls seen without a matching result yet, keyed by `call_id`.
     pub pending: HashMap<String, PendingToolCall>,
+    /// The session's lifecycle status.
     pub status: SessionStatus,
 }
 
@@ -70,6 +103,9 @@ impl Default for SessionState {
     }
 }
 
+/// A [`Projection`] that folds the agent vocabulary for a single namespace
+/// into a [`SessionState`] — the session transcript and status. Events from
+/// other namespaces are skipped.
 pub struct SessionProjection {
     namespace: String,
     state: SessionState,
@@ -77,6 +113,7 @@ pub struct SessionProjection {
 }
 
 impl SessionProjection {
+    /// Creates an empty projection scoped to `namespace`.
     pub fn new(namespace: impl Into<String>) -> Self {
         Self {
             namespace: namespace.into(),

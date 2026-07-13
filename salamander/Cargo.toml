@@ -11,6 +11,9 @@ homepage = "https://github.com/rdelprete/salamander-db"
 keywords = ["event-sourcing", "embedded", "database", "wal", "agent"]
 categories = ["database-implementations", "data-structures"]
 rust-version = "1.74"
+# Integration tests and their fixtures are development-only; keep them out
+# of the published crate (the lib, examples, and benches ship).
+exclude = ["tests/"]
 
 [lib]
 name = "salamander"

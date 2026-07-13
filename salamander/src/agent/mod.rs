@@ -31,50 +31,82 @@ pub use session::{
 /// (Phase 1.5 spec, WP-1 step 3).
 pub type AgentDb = Salamander<EventBody>;
 
+/// The speaker of a [`EventBody::ModelTurn`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Role {
+    /// A system prompt or instruction.
     System,
+    /// A message from the end user.
     User,
+    /// A message from the model.
     Assistant,
+    /// Output attributed to a tool.
     Tool,
 }
 
+/// The built-in agent-memory payload: a key/value vocabulary plus the
+/// typed events of an agent session (turns, tool calls, decisions). This is
+/// one provided payload over the generic engine — you can define your own
+/// instead.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EventBody {
-    // Generic KV — keeps the engine honest as a general-purpose store.
+    /// Set `key` to `value` in the key/value projection.
     Put {
+        /// The key to set.
         key: String,
+        /// The value to store.
         value: Vec<u8>,
     },
+    /// Remove `key` from the key/value projection.
     Delete {
+        /// The key to remove.
         key: String,
     },
 
-    // Agent session vocabulary.
+    /// Marks the start of an agent session.
     SessionStarted {
+        /// Identifier of the agent.
         agent_id: String,
+        /// Hash of the agent's configuration at session start.
         config_hash: String,
     },
+    /// One conversational turn.
     ModelTurn {
+        /// Who produced the turn.
         role: Role,
+        /// The turn's text content.
         content: String,
+        /// The model that produced it.
         model: String,
     },
+    /// An invocation of a tool.
     ToolCall {
+        /// Correlates this call with its [`EventBody::ToolResult`].
         call_id: String,
+        /// Name of the tool invoked.
         tool: String,
+        /// JSON-encoded arguments.
         args_json: String,
     },
+    /// The result of a [`EventBody::ToolCall`].
     ToolResult {
+        /// The `call_id` of the originating call.
         call_id: String,
+        /// Whether the call succeeded.
         ok: bool,
+        /// The result content.
         content: String,
     },
+    /// A recorded decision — the natural fork point in a session.
     Decision {
+        /// One-line summary of the decision.
         summary: String,
+        /// Why it was made.
         rationale: String,
     },
+    /// Marks the end of a session.
     SessionEnded {
+        /// Why the session ended.
         reason: String,
     },
 }
@@ -90,6 +122,7 @@ impl Salamander<EventBody> {
         self.session_view_on_branch(BranchId::ZERO, namespace)
     }
 
+    /// A [`SessionProjection`] for `namespace` on a specific branch.
     pub fn session_view_on_branch(
         &self,
         branch: BranchId,

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::format::{BranchId, Metadata, OwnedStoredRecord};
 use crate::{Result, SalamanderError};
 
+/// Name of the default branch every database has.
 pub const DEFAULT_BRANCH_NAME: &str = "main";
 /// Maximum number of branch nodes accepted in one ancestry chain.
 pub const MAX_LINEAGE_DEPTH: usize = 64;
@@ -16,8 +17,11 @@ pub const MAX_LINEAGE_DEPTH: usize = 64;
 pub struct BranchName(String);
 
 impl BranchName {
+    /// Maximum length of a branch name, in bytes.
     pub const MAX_BYTES: usize = 255;
 
+    /// Validates and constructs a branch name, rejecting empty, oversized,
+    /// or NUL-containing input.
     pub fn new(value: impl Into<String>) -> Result<Self> {
         let value = value.into();
         if value.is_empty() || value.as_bytes().contains(&0) {
@@ -35,11 +39,13 @@ impl BranchName {
         Ok(Self(value))
     }
 
+    /// The name as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 }
 
+/// Whether a branch accepts new writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BranchStatus {
     /// Accepts reads and writes.

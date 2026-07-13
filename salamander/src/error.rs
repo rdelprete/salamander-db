@@ -1,7 +1,13 @@
-//! Error type for the crate. One enum, `thiserror` derive — see
-//! IMPLEMENTATION.md Step 0.
+//! Error type for the crate: one enum with a `thiserror` derive.
 
+/// The error type returned by every fallible operation in this crate.
+///
+/// Each variant's `Display` output (from the `thiserror` `#[error("…")]`
+/// attribute) documents what it means; callers that need to branch on a
+/// failure should match on the variant rather than parse the message,
+/// which is not a stable API.
 #[derive(Debug, thiserror::Error)]
+#[allow(missing_docs)] // Each variant is documented by its #[error("…")] message.
 pub enum SalamanderError {
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
@@ -86,4 +92,5 @@ pub enum SalamanderError {
     NotBatchBoundary(u64),
 }
 
+/// Shorthand for a `Result` whose error is [`SalamanderError`].
 pub type Result<T> = std::result::Result<T, SalamanderError>;

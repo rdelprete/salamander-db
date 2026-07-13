@@ -6,6 +6,9 @@ use crate::format::{CodecId, OwnedStoredRecord};
 use crate::log::Log;
 use crate::{Result, SalamanderError};
 
+/// A deterministic fold of the log into derived state. Rebuild,
+/// time-travel, and fork are all the same fold stopped at a different
+/// point (INV-1).
 pub trait Projection {
     /// The payload type this projection folds. Ties the projection to a
     /// `Salamander<B>` with the same `B`: you can only build a projection
@@ -15,6 +18,7 @@ pub trait Projection {
     /// `B` to thread through.
     type Body: Body;
 
+    /// The derived state this projection maintains.
     type State;
 
     /// Apply one event. MUST be deterministic and infallible on valid
@@ -34,6 +38,7 @@ pub trait Projection {
 /// namespace, so it can't be built via plain `Default` the way
 /// `KvProjection` can.
 pub trait NamespaceScoped: Projection {
+    /// Constructs the projection already scoped to `namespace`.
     fn new_for(namespace: &str) -> Self;
 }
 

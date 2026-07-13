@@ -1,4 +1,8 @@
 //! Hostile-input validation and atomic publication for full projection snapshots.
+//!
+//! The descriptor types here are surfaced only through the `#[doc(hidden)]`
+//! engine facade, so `missing_docs` is relaxed for this module.
+#![allow(missing_docs)]
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};

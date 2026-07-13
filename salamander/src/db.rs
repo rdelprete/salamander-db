@@ -29,6 +29,13 @@ use crate::{
     SalamanderError, StreamName,
 };
 
+/// The embedded event-sourcing engine, generic over its payload type `B`.
+///
+/// Frames, orders, and persists events of any [`Body`] type without
+/// interpreting them; derived state is produced by [`Projection`]s and
+/// live [`View`](crate::View)s folded from the log. See
+/// [`AgentDb`](crate::AgentDb) and [`JsonDb`](crate::JsonDb) for ready-made
+/// payload vocabularies.
 pub struct Salamander<B> {
     pub(crate) log: Log,
     /// Live views owned by the DB, driven type-erased and kept at head by
@@ -158,6 +165,9 @@ impl<B: Body> Salamander<B> {
         self.policy
     }
 
+    /// Appends a single `body` to `namespace` on the default branch and
+    /// returns its position. A convenience wrapper over
+    /// [`append_batch`](Self::append_batch) with buffered durability.
     pub fn append(&mut self, namespace: &str, body: B) -> Result<u64> {
         let request = AppendRequest {
             branch: BranchId::ZERO,
@@ -173,6 +183,7 @@ impl<B: Body> Salamander<B> {
         Ok(self.append_batch(request)?.first_position)
     }
 
+    /// Like [`append`](Self::append), but targets a specific branch.
     pub fn append_on_branch(&mut self, branch: BranchId, namespace: &str, body: B) -> Result<u64> {
         let request = AppendRequest {
             branch,
@@ -262,6 +273,9 @@ impl<B: Body> Salamander<B> {
         Ok(offset)
     }
 
+    /// Appends a batch of events atomically, validating the
+    /// optimistic-concurrency expectation and idempotency key in the
+    /// writer-critical section, and returns the [`AppendReceipt`].
     pub fn append_batch(&mut self, request: AppendRequest<B>) -> Result<AppendReceipt> {
         self.append_batch_with_id(request, None)
     }
@@ -474,22 +488,27 @@ impl<B: Body> Salamander<B> {
         Ok(receipt)
     }
 
+    /// Metadata for the branch with `id`, or `None` if it does not exist.
     pub fn branch(&self, id: BranchId) -> Option<&BranchInfo> {
         self.branches.get(id)
     }
 
+    /// Metadata for the branch with the given name, or `None`.
     pub fn branch_named(&self, name: &str) -> Option<&BranchInfo> {
         self.branches.named(name)
     }
 
+    /// The branch's ancestry, root first, ending with `id`.
     pub fn branch_ancestry(&self, id: BranchId) -> Result<Vec<BranchInfo>> {
         self.branches.ancestry(id)
     }
 
+    /// The direct child branches of `id`.
     pub fn branch_children(&self, id: BranchId) -> Vec<BranchInfo> {
         self.branches.children(id)
     }
 
+    /// The nearest common ancestor of two branches.
     pub fn branch_common_ancestor(&self, left: BranchId, right: BranchId) -> Result<BranchInfo> {
         self.branches.common_ancestor(left, right)
     }
@@ -529,6 +548,9 @@ impl<B: Body> Salamander<B> {
         }))
     }
 
+    /// Replays the events of `namespace` visible on `branch` within
+    /// `range`, in order, invoking `f` on each — inherited parent history
+    /// is included through the fork point.
     pub fn replay_branch(
         &self,
         branch: BranchId,
@@ -552,6 +574,10 @@ impl<B: Body> Salamander<B> {
         Ok(())
     }
 
+    /// Creates a branch forked from `parent` at position `at`, which must
+    /// be a committed batch boundary visible in the parent. The child
+    /// inherits parent history up to `at` and then diverges; the parent is
+    /// unaffected.
     pub fn fork_branch(
         &mut self,
         parent: BranchId,
@@ -608,6 +634,8 @@ impl<B: Body> Salamander<B> {
         Ok(info)
     }
 
+    /// Archives a branch: it keeps its readable history but rejects new
+    /// writes. The default branch cannot be archived.
     pub fn archive_branch(&mut self, id: BranchId) -> Result<BranchInfo> {
         let mut info = self
             .branches

@@ -59,15 +59,21 @@ pub enum ReplayEnd {
 /// any derived state was built still route correctly.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum StreamSelector {
+    /// Every stream.
     #[default]
     All,
     /// An explicit set of stream IDs (deduplicated and sorted internally).
     Streams(Vec<StreamId>),
     /// Every stream whose ID hashes into partition `index` of `count`
-    /// equal hash classes — WP-09's healing unit. The hash is the first
-    /// eight little-endian bytes of the `StreamId` modulo `count`, which
-    /// is uniform because stream IDs are themselves hash-derived.
-    PartitionClass { count: u32, index: u32 },
+    /// equal hash classes — the healing unit. The hash is the first eight
+    /// little-endian bytes of the `StreamId` modulo `count`, which is
+    /// uniform because stream IDs are themselves hash-derived.
+    PartitionClass {
+        /// Number of partition classes.
+        count: u32,
+        /// Which class (0-based) to select.
+        index: u32,
+    },
 }
 
 impl StreamSelector {
@@ -136,15 +142,21 @@ pub enum VerificationMode {
 /// branch catalog by `Salamander::read`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayPlan {
+    /// Branch whose (inherited) history to read.
     pub branch: BranchId,
+    /// Which streams to include.
     pub streams: StreamSelector,
+    /// Lower bound on global position.
     pub from: Bound<u64>,
+    /// Where to stop (exclusive).
     pub until: ReplayEnd,
     /// Half-open envelope-timestamp filter (unix nanos). Timestamps are
     /// not monotonic in the log, so this is an exact per-record *filter*;
     /// sidecar min/max ranges are used only as a segment-skip hint.
     pub time: Option<Range<i64>>,
+    /// Stop after yielding this many events, if set.
     pub max_events: Option<u64>,
+    /// How much integrity re-verification to perform while reading.
     pub verification: VerificationMode,
 }
 
@@ -166,6 +178,8 @@ impl Default for ReplayPlan {
 /// record borrowing the reader's internal buffer; callers that need to
 /// hold records across calls use `next_owned`.
 pub trait RecordReader {
+    /// Yields the next matching record, borrowing the reader's internal
+    /// buffer, or `None` at the end of the plan.
     fn next(&mut self) -> Result<Option<StoredRecord<'_>>>;
 
     /// The resumable continuation: the first position this reader has not
@@ -173,6 +187,8 @@ pub trait RecordReader {
     /// plan resumes without gaps or duplicates.
     fn continuation(&self) -> u64;
 
+    /// Like [`next`](Self::next) but returns an owned record, copying the
+    /// payload out of the buffer so it can be held across calls.
     fn next_owned(&mut self) -> Result<Option<OwnedStoredRecord>> {
         Ok(self.next()?.map(OwnedStoredRecord::from))
     }

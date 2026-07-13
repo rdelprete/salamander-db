@@ -1,5 +1,5 @@
-//! DESIGN.md §5 — KvProjection: BTreeMap<String, Vec<u8>> over Put/Delete.
-//! The engine-correctness workhorse; used by the crash harness (M4).
+//! `KvProjection`: a `BTreeMap<String, Vec<u8>>` folded over `Put`/`Delete`
+//! events. The engine-correctness workhorse; used by the crash harness.
 //!
 //! Kept in the `agent` module for now (Phase 1.5 spec, WP-1 step 4): its
 //! `Put`/`Delete` live in `EventBody`, so it folds `EventBody` like the
@@ -12,6 +12,9 @@ use super::EventBody;
 use crate::event::Event;
 use crate::projection::Projection;
 
+/// A last-write-wins key/value store folded from [`EventBody::Put`] and
+/// [`EventBody::Delete`] events. The simplest built-in projection; the
+/// query layer's [`crate::IndexedView`] is the general-purpose store.
 #[derive(Debug, Default)]
 pub struct KvProjection {
     state: BTreeMap<String, Vec<u8>>,

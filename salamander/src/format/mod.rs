@@ -3,6 +3,11 @@
 //! This module owns byte-level engine metadata while treating application
 //! payloads as opaque bytes. It intentionally has no dependency on the log,
 //! projections, agent vocabulary, or database API.
+//!
+//! `#[doc(hidden)]` at the crate root: the framing internals here are not a
+//! stable API. The engine identity and codec types users actually need are
+//! re-exported at the crate root and documented there.
+#![allow(missing_docs)]
 
 use std::collections::BTreeMap;
 use std::fmt;

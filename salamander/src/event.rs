@@ -21,6 +21,7 @@ pub struct Event<B> {
     pub timestamp_ms: u64,
     /// e.g. session id.
     pub namespace: String,
+    /// The application payload; opaque to the engine.
     pub body: B,
 }
 

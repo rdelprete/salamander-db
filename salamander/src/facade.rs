@@ -1,4 +1,10 @@
 //! Thread-safe, non-generic service boundary for native-language bindings.
+//!
+//! This is a `#[doc(hidden)]` layer: the DTOs and handles here are the
+//! FFI/binding substrate and the current home of the committed-batch feed,
+//! not the stable typed Rust API. `missing_docs` is intentionally relaxed
+//! for this module.
+#![allow(missing_docs)]
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;

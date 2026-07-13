@@ -48,6 +48,8 @@
 //! # }
 //! ```
 
+#![warn(missing_docs)]
+
 mod branch;
 mod commit;
 mod error;
@@ -60,17 +62,28 @@ mod snapshot;
 mod stream;
 
 pub mod agent;
+/// Low-level engine framing and codec types. Most users need only the
+/// types re-exported at the crate root (`BranchId`, `StreamId`,
+/// `EventType`, `CodecId`, …); the framing internals here are not a stable
+/// API.
+#[doc(hidden)]
 pub mod format;
-pub mod introspect;
 pub mod json;
 pub mod view;
 
 mod db;
+mod introspect;
 
 pub use branch::{BranchInfo, BranchName, BranchStatus, DEFAULT_BRANCH_NAME, MAX_LINEAGE_DEPTH};
 pub use commit::CommitPolicy;
 pub use error::{Result, SalamanderError};
 pub use event::{Body, Event};
+// The non-generic engine facade: the language-neutral boundary the
+// language bindings bind to, and the current home of the committed-batch
+// feed. Reachable (examples and `salamander-py` use these root paths) but
+// hidden from the documented surface — it is an advanced/plumbing layer,
+// not the stable typed Rust API, which is `Salamander`/`AgentDb`/`JsonDb`.
+#[doc(hidden)]
 pub use facade::{
     AppendBatch as EngineAppendBatch, AppendReceiptDto as EngineAppendReceipt, BranchDto,
     CommittedBatch, DurabilityDto, Engine, EngineError, EngineOptions, ErrorCategory, EventData,
@@ -87,8 +100,10 @@ pub use format::{
     StreamRevision, TypedCodec,
 };
 pub use log::{
-    partition_of, LogReader, RecordReader, ReplayEnd, ReplayPlan, StreamSelector, VerificationMode,
+    LogReader, RecordReader, ReplayEnd, ReplayPlan, StreamSelector, VerificationMode,
 };
+#[doc(hidden)]
+pub use log::partition_of;
 pub use projection::{NamespaceScoped, Projection};
 pub use view::{Change, IndexKey, IndexedView, View};
 
@@ -96,6 +111,11 @@ pub use agent::AgentDb;
 pub use db::Salamander;
 pub use json::{Json, JsonDb};
 pub use migration::{migrate_legacy_branches, migrate_v1, BranchMigrationReport, MigrationReport};
+// Snapshot descriptors are surfaced only through the engine facade
+// (snapshot management is not on the typed `Salamander` API — instant
+// recovery uses snapshots internally). Reachable for bindings, hidden from
+// the documented surface.
+#[doc(hidden)]
 pub use snapshot::{SnapshotInfo, SnapshotManifest, MAX_SNAPSHOT_STATE_BYTES};
 pub use stream::{
     AppendReceipt, AppendRequest, Durability, ExpectedRevision, IdempotencyKey, NewEvent,

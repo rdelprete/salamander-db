@@ -18,14 +18,18 @@ use crate::projection::Projection;
 /// The change a `project` closure derives from one event: upsert or remove
 /// a primary key. Events irrelevant to this view yield `None` instead.
 pub enum Change<K, V> {
+    /// Insert or replace the value at the primary key `K`.
     Put(K, V),
+    /// Remove the entry at the primary key `K`.
     Delete(K),
 }
 
 impl<K, V> Change<K, V> {
+    /// Constructs a [`Change::Put`].
     pub fn put(key: K, value: V) -> Self {
         Change::Put(key, value)
     }
+    /// Constructs a [`Change::Delete`].
     pub fn delete(key: K) -> Self {
         Change::Delete(key)
     }
@@ -53,12 +57,16 @@ pub struct IndexedView<K, V, B> {
 
 /// Builder for [`IndexedView`] — `.project(..)` (required) then any number
 /// of `.index(name, ..)`, then `.build()`.
+/// Builder for an [`IndexedView`]: supply a `project` closure and any
+/// number of named secondary indexes, then `build`.
 pub struct IndexedViewBuilder<K, V, B> {
     project: Option<Projector<K, V, B>>,
     indexers: Vec<(String, Indexer<V>)>,
 }
 
 impl<K, V, B> IndexedView<K, V, B> {
+    /// Starts building a view; call `project` (required) and `index`
+    /// (optional) on the returned builder.
     pub fn builder() -> IndexedViewBuilder<K, V, B> {
         IndexedViewBuilder {
             project: None,
@@ -83,6 +91,7 @@ impl<K, V, B> IndexedViewBuilder<K, V, B> {
         self
     }
 
+    /// Finishes the view. Panics if no `project` closure was supplied.
     pub fn build(self) -> IndexedView<K, V, B> {
         IndexedView {
             project: self
@@ -205,10 +214,12 @@ where
             .collect()
     }
 
+    /// Number of primary entries in the view.
     pub fn len(&self) -> usize {
         self.primary.len()
     }
 
+    /// Whether the view has no primary entries.
     pub fn is_empty(&self) -> bool {
         self.primary.is_empty()
     }
@@ -228,6 +239,7 @@ impl<V, B> IndexedView<String, V, B> {
 }
 
 impl<V, B> IndexedView<Vec<u8>, V, B> {
+    /// Every entry whose byte key starts with `prefix`, in key order.
     pub fn prefix<'a>(
         &'a self,
         prefix: &'a [u8],
