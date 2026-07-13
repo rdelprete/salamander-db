@@ -48,6 +48,7 @@ forward-compatible).
 |---|---|
 | `salamander.open(path, commit_every_bytes=, commit_every_count=, commit_every_millis=)` | `JsonDb::open_with_policy` |
 | `db.append(namespace, event: dict) -> int` | `append` (payload = JSON) |
+| `db.append_batch(namespace, events, ...) -> dict` | atomic batch append with concurrency, idempotency, and durability |
 | `db.append_branch(branch, namespace, event) -> int` | append to an engine branch |
 | `db.commit() -> int` | `commit` (fsync) |
 | `db.head() -> int` | `head` |
@@ -62,6 +63,51 @@ forward-compatible).
 
 `View` handles support `.get(key)`, `.by(index, key)`, `.range(lo, hi)`,
 `.prefix(p)`, `.len()`.
+
+### Atomic batches and concurrency
+
+`append_batch` exposes the engine's complete append contract. Every event is
+a descriptor with a required `body` and optional `event_type`,
+`schema_version`, `metadata` (byte strings or UTF-8 strings), and a 32-digit
+hexadecimal `event_id`:
+
+```python
+receipt = db.append_batch(
+    "orders",
+    [
+        {
+            "body": {"order_id": "o-1", "state": "created"},
+            "event_type": "order.created",
+            "schema_version": 2,
+            "metadata": {"trace_id": "trace-1"},
+        },
+        {
+            "body": {"order_id": "o-1", "state": "paid"},
+            "event_type": "order.paid",
+        },
+    ],
+    expected_revision="no_stream",  # or "any" / an exact non-negative revision
+    idempotency_key="create-o-1",   # bytes and UTF-8 strings are accepted
+    durability="sync",              # "buffered" / "flush" / "sync"
+)
+```
+
+The batch is visible all-or-nothing. Identical retries with the same
+idempotency key return the original receipt; conflicting reuse raises
+`salamander.ConflictError` and writes nothing. The other stable exception
+categories include `InvalidArgumentError`, `NotFoundError`, `LockedError`,
+`IoError`, `CorruptionError`, `UnsupportedFormatError`, `CodecError`,
+`ResourceLimitError`, and `CancelledError`. They retain compatibility with
+their former built-in bases (`ValueError`, `KeyError`, `OSError`, or
+`RuntimeError`).
+
+Pass `branch="branch-name"` to append the batch to an existing branch.
+Optimistic revisions are branch-local: inherited history is replay-visible,
+but the first local write to a stream on a new child branch uses
+`expected_revision="no_stream"` (or `"any"`).
+Replay rows include event and batch IDs, batch index, stream revision, event
+type, schema version, codec, and metadata in addition to `offset`,
+`timestamp_ms`, and `body`.
 
 Payloads are any JSON-able Python value (`dict`/`list`/`str`/`int`/`float`/
 `bool`/`None`), converted to/from `serde_json::Value` at the boundary. Views

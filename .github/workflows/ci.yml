@@ -33,3 +33,19 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --workspace
+
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@stable
+      - run: python -m pip install maturin pytest
+      - run: maturin develop --manifest-path salamander-py/Cargo.toml
+      - run: >-
+          python -m pytest
+          examples/py/test_roundtrip.py
+          examples/py/test_query_and_fork.py
+          -v

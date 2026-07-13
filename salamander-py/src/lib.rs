@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use pyo3::create_exception;
 use pyo3::exceptions::{PyIOError, PyKeyError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyBytes, PyDict, PyList};
@@ -11,6 +12,18 @@ use salamander_db::{
     ReplayRequest,
 };
 use serde_json::Value;
+
+create_exception!(salamander, SalamanderError, PyRuntimeError);
+create_exception!(salamander, InvalidArgumentError, PyValueError);
+create_exception!(salamander, ConflictError, PyValueError);
+create_exception!(salamander, NotFoundError, PyKeyError);
+create_exception!(salamander, LockedError, PyIOError);
+create_exception!(salamander, IoError, PyIOError);
+create_exception!(salamander, CorruptionError, PyRuntimeError);
+create_exception!(salamander, UnsupportedFormatError, PyRuntimeError);
+create_exception!(salamander, CodecError, PyValueError);
+create_exception!(salamander, ResourceLimitError, PyValueError);
+create_exception!(salamander, CancelledError, PyRuntimeError);
 
 #[pyclass]
 struct Salamander {
@@ -39,7 +52,9 @@ impl Salamander {
         options.snapshot_every_events = snapshot_every_events;
         options.snapshot_every_bytes = snapshot_every_bytes;
         options.snapshot_every_millis = snapshot_every_millis;
-        let engine = py.allow_threads(|| Engine::open(options)).map_err(to_pyerr)?;
+        let engine = py
+            .allow_threads(|| Engine::open(options))
+            .map_err(to_pyerr)?;
         Ok(Self { engine })
     }
 
@@ -60,6 +75,44 @@ impl Salamander {
         let payload = value_bytes(&py_to_value(event)?)?;
         let receipt = py
             .allow_threads(|| self.engine.append(json_batch([0; 16], namespace, payload)))
+            .map_err(to_pyerr)?;
+        receipt_to_py(py, &receipt)
+    }
+
+    /// Atomically append a batch of fully described JSON events.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (namespace, events, *, branch=None, expected_revision=None, idempotency_key=None, durability="buffered"))]
+    fn append_batch(
+        &self,
+        py: Python<'_>,
+        namespace: &str,
+        events: &Bound<'_, PyList>,
+        branch: Option<&str>,
+        expected_revision: Option<Bound<'_, PyAny>>,
+        idempotency_key: Option<Bound<'_, PyAny>>,
+        durability: &str,
+    ) -> PyResult<PyObject> {
+        let branch_id = match branch {
+            Some(name) => {
+                py.allow_threads(|| self.engine.branch_named(name.to_string()))
+                    .map_err(to_pyerr)?
+                    .id
+            }
+            None => [0; 16],
+        };
+        let request = EngineAppendBatch {
+            branch_id,
+            stream: namespace.to_string(),
+            expected: parse_expected_revision(expected_revision.as_ref())?,
+            idempotency_key: idempotency_key.as_ref().map(bytes_or_utf8).transpose()?,
+            events: events
+                .iter()
+                .map(|event| event_data(&event))
+                .collect::<PyResult<_>>()?,
+            durability: parse_durability(durability)?,
+        };
+        let receipt = py
+            .allow_threads(|| self.engine.append(request))
             .map_err(to_pyerr)?;
         receipt_to_py(py, &receipt)
     }
@@ -89,7 +142,8 @@ impl Salamander {
     }
 
     fn durable_head(&self, py: Python<'_>) -> PyResult<u64> {
-        py.allow_threads(|| self.engine.durable_head()).map_err(to_pyerr)
+        py.allow_threads(|| self.engine.durable_head())
+            .map_err(to_pyerr)
     }
 
     fn uncommitted_count(&self, py: Python<'_>) -> PyResult<u64> {
@@ -366,27 +420,45 @@ impl View {
         let result = py
             .allow_threads(|| engine.query(self.handle, QueryOperation::Get(key.into())))
             .map_err(to_pyerr)?;
-        result.rows.first().map(|row| bytes_to_py(py, row)).transpose()
+        result
+            .rows
+            .first()
+            .map(|row| bytes_to_py(py, row))
+            .transpose()
     }
 
     fn by(&self, py: Python<'_>, index: &str, key: &Bound<'_, PyAny>) -> PyResult<Py<PyList>> {
         let key = index_key_bytes(&py_to_value(key)?);
         let engine = self.parent.bind(py).borrow().engine.clone();
         let result = py
-            .allow_threads(|| engine.query(self.handle, QueryOperation::By { index: index.into(), key }))
+            .allow_threads(|| {
+                engine.query(
+                    self.handle,
+                    QueryOperation::By {
+                        index: index.into(),
+                        key,
+                    },
+                )
+            })
             .map_err(to_pyerr)?;
         bytes_rows_to_pylist(py, &result.rows)
     }
 
     fn range(&self, py: Python<'_>, lo: String, hi: String) -> PyResult<Py<PyList>> {
         let engine = self.parent.bind(py).borrow().engine.clone();
-        let result = py.allow_threads(|| engine.query(self.handle, QueryOperation::Range { start: lo, end: hi })).map_err(to_pyerr)?;
+        let result = py
+            .allow_threads(|| {
+                engine.query(self.handle, QueryOperation::Range { start: lo, end: hi })
+            })
+            .map_err(to_pyerr)?;
         bytes_rows_to_pylist(py, &result.rows)
     }
 
     fn prefix(&self, py: Python<'_>, prefix: &str) -> PyResult<Py<PyList>> {
         let engine = self.parent.bind(py).borrow().engine.clone();
-        let result = py.allow_threads(|| engine.query(self.handle, QueryOperation::Prefix(prefix.into()))).map_err(to_pyerr)?;
+        let result = py
+            .allow_threads(|| engine.query(self.handle, QueryOperation::Prefix(prefix.into())))
+            .map_err(to_pyerr)?;
         bytes_rows_to_pylist(py, &result.rows)
     }
 
@@ -413,13 +485,142 @@ fn json_batch(branch_id: [u8; 16], stream: &str, payload: Vec<u8>) -> EngineAppe
     }
 }
 
-fn collect(engine: &Engine, branch_id: [u8; 16], stream: &str, from: u64, until: Option<u64>) -> Result<Vec<RecordDto>, EngineError> {
-    let handle = engine.open_reader(ReplayRequest { branch_id, stream: Some(stream.into()), from, until, page_events: 1024, page_bytes: 8 * 1024 * 1024 })?;
+fn event_data(event: &Bound<'_, PyAny>) -> PyResult<EventData> {
+    let descriptor = event.downcast::<PyDict>().map_err(|_| {
+        InvalidArgumentError::new_err("each batch event must be a dict with a 'body' field")
+    })?;
+    let body = descriptor
+        .get_item("body")?
+        .ok_or_else(|| InvalidArgumentError::new_err("batch event is missing required 'body'"))?;
+    let event_type = descriptor
+        .get_item("event_type")?
+        .map(|value| value.extract::<String>())
+        .transpose()?
+        .unwrap_or_else(|| "application.json".into());
+    let schema_version = descriptor
+        .get_item("schema_version")?
+        .map(|value| value.extract::<u32>())
+        .transpose()?
+        .unwrap_or(1);
+    let event_id = descriptor
+        .get_item("event_id")?
+        .map(|value| {
+            value
+                .extract::<String>()
+                .and_then(|value| parse_hex_id(&value))
+        })
+        .transpose()?;
+    let metadata = descriptor
+        .get_item("metadata")?
+        .map(|value| parse_metadata(&value))
+        .transpose()?
+        .unwrap_or_default();
+    Ok(EventData {
+        event_id,
+        event_type,
+        schema_version,
+        metadata,
+        codec: salamander_db::PayloadCodec::Json,
+        payload: value_bytes(&py_to_value(&body)?)?,
+    })
+}
+
+fn parse_expected_revision(value: Option<&Bound<'_, PyAny>>) -> PyResult<ExpectedRevisionDto> {
+    let Some(value) = value else {
+        return Ok(ExpectedRevisionDto::Any);
+    };
+    if value.is_none() {
+        return Ok(ExpectedRevisionDto::Any);
+    }
+    if value.downcast::<PyBool>().is_ok() {
+        return Err(InvalidArgumentError::new_err(
+            "expected_revision must be None, 'any', 'no_stream', or a non-negative integer",
+        ));
+    }
+    if let Ok(revision) = value.extract::<u64>() {
+        return Ok(ExpectedRevisionDto::Exact(revision));
+    }
+    if let Ok(value) = value.extract::<String>() {
+        match value.as_str() {
+            "any" => return Ok(ExpectedRevisionDto::Any),
+            "no_stream" => return Ok(ExpectedRevisionDto::NoStream),
+            _ => {}
+        }
+    }
+    Err(InvalidArgumentError::new_err(
+        "expected_revision must be None, 'any', 'no_stream', or a non-negative integer",
+    ))
+}
+
+fn parse_durability(value: &str) -> PyResult<DurabilityDto> {
+    match value {
+        "buffered" => Ok(DurabilityDto::Buffered),
+        "flush" => Ok(DurabilityDto::Flush),
+        "sync" => Ok(DurabilityDto::Sync),
+        _ => Err(InvalidArgumentError::new_err(
+            "durability must be 'buffered', 'flush', or 'sync'",
+        )),
+    }
+}
+
+fn parse_metadata(value: &Bound<'_, PyAny>) -> PyResult<BTreeMap<String, Vec<u8>>> {
+    let metadata = value
+        .downcast::<PyDict>()
+        .map_err(|_| InvalidArgumentError::new_err("event metadata must be a dict"))?;
+    metadata
+        .iter()
+        .map(|(key, value)| Ok((key.extract::<String>()?, bytes_or_utf8(&value)?)))
+        .collect()
+}
+
+fn bytes_or_utf8(value: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
+    if let Ok(value) = value.downcast::<PyBytes>() {
+        return Ok(value.as_bytes().to_vec());
+    }
+    if let Ok(value) = value.extract::<String>() {
+        return Ok(value.into_bytes());
+    }
+    Err(InvalidArgumentError::new_err(
+        "value must be bytes or a UTF-8 string",
+    ))
+}
+
+fn parse_hex_id(value: &str) -> PyResult<[u8; 16]> {
+    if value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(InvalidArgumentError::new_err(
+            "event_id must contain exactly 32 hexadecimal characters",
+        ));
+    }
+    let mut id = [0; 16];
+    for (index, byte) in id.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
+            .map_err(|_| InvalidArgumentError::new_err("event_id is not valid hexadecimal"))?;
+    }
+    Ok(id)
+}
+
+fn collect(
+    engine: &Engine,
+    branch_id: [u8; 16],
+    stream: &str,
+    from: u64,
+    until: Option<u64>,
+) -> Result<Vec<RecordDto>, EngineError> {
+    let handle = engine.open_reader(ReplayRequest {
+        branch_id,
+        stream: Some(stream.into()),
+        from,
+        until,
+        page_events: 1024,
+        page_bytes: 8 * 1024 * 1024,
+    })?;
     let mut records = Vec::new();
     loop {
         let page = engine.next_page(handle)?;
         records.extend(page.records);
-        if page.done { break; }
+        if page.done {
+            break;
+        }
     }
     engine.close_reader(handle)?;
     Ok(records)
@@ -431,6 +632,24 @@ fn rows_to_pylist(py: Python<'_>, rows: &[RecordDto]) -> PyResult<Py<PyList>> {
         let dict = PyDict::new(py);
         dict.set_item("offset", row.position)?;
         dict.set_item("timestamp_ms", row.timestamp_unix_nanos / 1_000_000)?;
+        dict.set_item("event_id", hex_id(row.event_id))?;
+        dict.set_item("batch_id", hex_id(row.batch_id))?;
+        dict.set_item("batch_index", row.batch_index)?;
+        dict.set_item("stream_revision", row.stream_revision)?;
+        dict.set_item("event_type", &row.event_type)?;
+        dict.set_item("schema_version", row.schema_version)?;
+        dict.set_item(
+            "codec",
+            match row.codec {
+                salamander_db::PayloadCodec::Bytes => "bytes",
+                salamander_db::PayloadCodec::Json => "json",
+            },
+        )?;
+        let metadata = PyDict::new(py);
+        for (key, value) in &row.metadata {
+            metadata.set_item(key, PyBytes::new(py, value))?;
+        }
+        dict.set_item("metadata", metadata)?;
         dict.set_item("body", bytes_to_py(py, &row.payload)?)?;
         out.append(dict)?;
     }
@@ -475,10 +694,7 @@ fn receipt_to_py(
     Ok(out.into_any().unbind())
 }
 
-fn snapshot_info_to_py(
-    py: Python<'_>,
-    info: &salamander_db::SnapshotInfo,
-) -> PyResult<PyObject> {
+fn snapshot_info_to_py(py: Python<'_>, info: &salamander_db::SnapshotInfo) -> PyResult<PyObject> {
     let out = PyDict::new(py);
     out.set_item("id", &info.id)?;
     out.set_item("projection", &info.manifest.projection_name)?;
@@ -489,13 +705,16 @@ fn snapshot_info_to_py(
 }
 
 fn bytes_to_py(py: Python<'_>, bytes: &[u8]) -> PyResult<PyObject> {
-    let value: Value = serde_json::from_slice(bytes).map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let value: Value =
+        serde_json::from_slice(bytes).map_err(|error| PyValueError::new_err(error.to_string()))?;
     value_to_py(py, &value)
 }
 
 fn bytes_rows_to_pylist(py: Python<'_>, rows: &[Vec<u8>]) -> PyResult<Py<PyList>> {
     let out = PyList::empty(py);
-    for row in rows { out.append(bytes_to_py(py, row)?)?; }
+    for row in rows {
+        out.append(bytes_to_py(py, row)?)?;
+    }
     Ok(out.unbind())
 }
 
@@ -504,49 +723,131 @@ fn value_bytes(value: &Value) -> PyResult<Vec<u8>> {
 }
 
 fn index_key_bytes(value: &Value) -> Vec<u8> {
-    value.as_str().map_or_else(|| value.to_string().into_bytes(), |value| value.as_bytes().to_vec())
+    value.as_str().map_or_else(
+        || value.to_string().into_bytes(),
+        |value| value.as_bytes().to_vec(),
+    )
 }
 
-fn hex_id(id: [u8; 16]) -> String { id.iter().map(|byte| format!("{byte:02x}")).collect() }
+fn hex_id(id: [u8; 16]) -> String {
+    id.iter().map(|byte| format!("{byte:02x}")).collect()
+}
 
 fn to_pyerr(error: EngineError) -> PyErr {
     match error.category {
-        ErrorCategory::NotFound => PyKeyError::new_err(error.to_string()),
-        ErrorCategory::Io | ErrorCategory::Locked => PyIOError::new_err(error.to_string()),
-        ErrorCategory::InvalidArgument | ErrorCategory::Conflict | ErrorCategory::Codec | ErrorCategory::ResourceLimit => PyValueError::new_err(error.to_string()),
-        ErrorCategory::Corruption | ErrorCategory::UnsupportedFormat | ErrorCategory::Cancelled | ErrorCategory::Internal => PyRuntimeError::new_err(error.to_string()),
+        ErrorCategory::InvalidArgument => InvalidArgumentError::new_err(error.to_string()),
+        ErrorCategory::Conflict => ConflictError::new_err(error.to_string()),
+        ErrorCategory::NotFound => NotFoundError::new_err(error.to_string()),
+        ErrorCategory::Locked => LockedError::new_err(error.to_string()),
+        ErrorCategory::Io => IoError::new_err(error.to_string()),
+        ErrorCategory::Corruption => CorruptionError::new_err(error.to_string()),
+        ErrorCategory::UnsupportedFormat => UnsupportedFormatError::new_err(error.to_string()),
+        ErrorCategory::Codec => CodecError::new_err(error.to_string()),
+        ErrorCategory::Cancelled => CancelledError::new_err(error.to_string()),
+        ErrorCategory::ResourceLimit => ResourceLimitError::new_err(error.to_string()),
+        ErrorCategory::Internal => SalamanderError::new_err(error.to_string()),
     }
 }
 
 fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
-    if obj.is_none() { return Ok(Value::Null); }
-    if let Ok(value) = obj.downcast::<PyBool>() { return Ok(Value::Bool(value.is_true())); }
-    if let Ok(value) = obj.extract::<i64>() { return Ok(Value::from(value)); }
-    if let Ok(value) = obj.extract::<f64>() { return Ok(Value::from(value)); }
-    if let Ok(value) = obj.extract::<String>() { return Ok(Value::String(value)); }
-    if let Ok(list) = obj.downcast::<PyList>() { return Ok(Value::Array(list.iter().map(|item| py_to_value(&item)).collect::<PyResult<_>>()?)); }
-    if let Ok(dict) = obj.downcast::<PyDict>() { let mut map = serde_json::Map::new(); for (key, value) in dict.iter() { map.insert(key.extract()?, py_to_value(&value)?); } return Ok(Value::Object(map)); }
-    Err(PyValueError::new_err(format!("object of type {} is not JSON-serializable", obj.get_type().name()?)))
+    if obj.is_none() {
+        return Ok(Value::Null);
+    }
+    if let Ok(value) = obj.downcast::<PyBool>() {
+        return Ok(Value::Bool(value.is_true()));
+    }
+    if let Ok(value) = obj.extract::<i64>() {
+        return Ok(Value::from(value));
+    }
+    if let Ok(value) = obj.extract::<f64>() {
+        return Ok(Value::from(value));
+    }
+    if let Ok(value) = obj.extract::<String>() {
+        return Ok(Value::String(value));
+    }
+    if let Ok(list) = obj.downcast::<PyList>() {
+        return Ok(Value::Array(
+            list.iter()
+                .map(|item| py_to_value(&item))
+                .collect::<PyResult<_>>()?,
+        ));
+    }
+    if let Ok(dict) = obj.downcast::<PyDict>() {
+        let mut map = serde_json::Map::new();
+        for (key, value) in dict.iter() {
+            map.insert(key.extract()?, py_to_value(&value)?);
+        }
+        return Ok(Value::Object(map));
+    }
+    Err(PyValueError::new_err(format!(
+        "object of type {} is not JSON-serializable",
+        obj.get_type().name()?
+    )))
 }
 
 fn value_to_py(py: Python<'_>, value: &Value) -> PyResult<PyObject> {
     Ok(match value {
         Value::Null => py.None(),
         Value::Bool(value) => value.into_pyobject(py)?.to_owned().into_any().unbind(),
-        Value::Number(value) if value.is_i64() => value.as_i64().unwrap().into_pyobject(py)?.into_any().unbind(),
-        Value::Number(value) if value.is_u64() => value.as_u64().unwrap().into_pyobject(py)?.into_any().unbind(),
-        Value::Number(value) => value.as_f64().unwrap_or(f64::NAN).into_pyobject(py)?.into_any().unbind(),
+        Value::Number(value) if value.is_i64() => value
+            .as_i64()
+            .unwrap()
+            .into_pyobject(py)?
+            .into_any()
+            .unbind(),
+        Value::Number(value) if value.is_u64() => value
+            .as_u64()
+            .unwrap()
+            .into_pyobject(py)?
+            .into_any()
+            .unbind(),
+        Value::Number(value) => value
+            .as_f64()
+            .unwrap_or(f64::NAN)
+            .into_pyobject(py)?
+            .into_any()
+            .unbind(),
         Value::String(value) => value.into_pyobject(py)?.into_any().unbind(),
-        Value::Array(values) => { let out = PyList::empty(py); for value in values { out.append(value_to_py(py, value)?)?; } out.into_any().unbind() }
-        Value::Object(values) => { let out = PyDict::new(py); for (key, value) in values { out.set_item(key, value_to_py(py, value)?)?; } out.into_any().unbind() }
+        Value::Array(values) => {
+            let out = PyList::empty(py);
+            for value in values {
+                out.append(value_to_py(py, value)?)?;
+            }
+            out.into_any().unbind()
+        }
+        Value::Object(values) => {
+            let out = PyDict::new(py);
+            for (key, value) in values {
+                out.set_item(key, value_to_py(py, value)?)?;
+            }
+            out.into_any().unbind()
+        }
     })
 }
 
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 #[pyo3(signature = (path, commit_every_bytes=None, commit_every_count=None, commit_every_millis=None, snapshot_every_events=None, snapshot_every_bytes=None, snapshot_every_millis=None))]
-fn open(py: Python<'_>, path: &str, commit_every_bytes: Option<u64>, commit_every_count: Option<u64>, commit_every_millis: Option<u64>, snapshot_every_events: Option<u64>, snapshot_every_bytes: Option<u64>, snapshot_every_millis: Option<u64>) -> PyResult<Salamander> {
-    Salamander::open(py, path, commit_every_bytes, commit_every_count, commit_every_millis, snapshot_every_events, snapshot_every_bytes, snapshot_every_millis)
+fn open(
+    py: Python<'_>,
+    path: &str,
+    commit_every_bytes: Option<u64>,
+    commit_every_count: Option<u64>,
+    commit_every_millis: Option<u64>,
+    snapshot_every_events: Option<u64>,
+    snapshot_every_bytes: Option<u64>,
+    snapshot_every_millis: Option<u64>,
+) -> PyResult<Salamander> {
+    Salamander::open(
+        py,
+        path,
+        commit_every_bytes,
+        commit_every_count,
+        commit_every_millis,
+        snapshot_every_events,
+        snapshot_every_bytes,
+        snapshot_every_millis,
+    )
 }
 
 #[pymodule]
@@ -555,6 +856,26 @@ fn salamander(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<View>()?;
     m.add_class::<Reader>()?;
     m.add_function(wrap_pyfunction!(open, m)?)?;
+    m.add("SalamanderError", m.py().get_type::<SalamanderError>())?;
+    m.add(
+        "InvalidArgumentError",
+        m.py().get_type::<InvalidArgumentError>(),
+    )?;
+    m.add("ConflictError", m.py().get_type::<ConflictError>())?;
+    m.add("NotFoundError", m.py().get_type::<NotFoundError>())?;
+    m.add("LockedError", m.py().get_type::<LockedError>())?;
+    m.add("IoError", m.py().get_type::<IoError>())?;
+    m.add("CorruptionError", m.py().get_type::<CorruptionError>())?;
+    m.add(
+        "UnsupportedFormatError",
+        m.py().get_type::<UnsupportedFormatError>(),
+    )?;
+    m.add("CodecError", m.py().get_type::<CodecError>())?;
+    m.add(
+        "ResourceLimitError",
+        m.py().get_type::<ResourceLimitError>(),
+    )?;
+    m.add("CancelledError", m.py().get_type::<CancelledError>())?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

@@ -85,7 +85,10 @@ stable on-disk format through instant recovery.
   cursor-based replay: the single boundary all bindings share.
 - **Python bindings** — `salamander-py` (PyO3/maturin) over the facade:
   `salamander.open`, dict-in/dict-out events, streams, branches, replay, and a
-  LangGraph checkpointer that survives process restarts.
+  LangGraph checkpointer that survives process restarts. Atomic batch append
+  exposes optimistic concurrency, idempotent retries, explicit durability,
+  event identity/type/schema/metadata, complete receipts, and stable typed
+  exception categories without duplicating engine semantics in Python.
 - **Playground** — `cargo run -p salamander-demo -- ui` serves a local
   zero-dependency web UI: append JSON events, scrub the time-travel slider,
   fork the timeline, and watch branches diverge.

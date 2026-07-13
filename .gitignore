@@ -9,6 +9,8 @@ LOCK
 # Local playground data dirs
 salamander-playground/
 
+release-readme.md
+
 # Python (salamander-py bindings)
 __pycache__/
 *.pyc
