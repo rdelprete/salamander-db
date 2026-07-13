@@ -99,11 +99,9 @@ pub use format::{
     FrameKind, JsonCodec, Metadata, OwnedStoredRecord, RecordEnvelopeV2, StoredRecord, StreamId,
     StreamRevision, TypedCodec,
 };
-pub use log::{
-    LogReader, RecordReader, ReplayEnd, ReplayPlan, StreamSelector, VerificationMode,
-};
 #[doc(hidden)]
 pub use log::partition_of;
+pub use log::{LogReader, RecordReader, ReplayEnd, ReplayPlan, StreamSelector, VerificationMode};
 pub use projection::{NamespaceScoped, Projection};
 pub use view::{Change, IndexKey, IndexedView, View};
 

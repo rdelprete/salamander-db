@@ -639,7 +639,7 @@ impl<'log> LogReader<'log> {
                 let passes = wanted
                     && (!is_event || position >= self.filter.from)
                     && self.filter.selector.matches(envelope.stream_id)
-                    && self.filter.scopes.as_ref().map_or(true, |scopes| {
+                    && self.filter.scopes.as_ref().is_none_or(|scopes| {
                         scopes.iter().any(|(branch, upper)| {
                             envelope.branch_id == *branch && position < *upper
                         })
@@ -648,7 +648,7 @@ impl<'log> LogReader<'log> {
                         .filter
                         .time
                         .as_ref()
-                        .map_or(true, |range| range.contains(&envelope.timestamp_unix_nanos));
+                        .is_none_or(|range| range.contains(&envelope.timestamp_unix_nanos));
 
                 if is_event {
                     self.continuation = self.continuation.max(position + 1);
