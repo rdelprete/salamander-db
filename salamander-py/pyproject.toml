@@ -4,7 +4,8 @@ build-backend = "maturin"
 
 [project]
 name = "salamander-db"
-version = "0.1.0"
+# Sourced from salamander-py/Cargo.toml by maturin — one place to bump.
+dynamic = ["version"]
 description = "SQLite for event-sourced state — Python bindings for salamander-db."
 readme = "README.md"
 requires-python = ">=3.9"

@@ -13,7 +13,9 @@ name = "salamander"
 crate-type = ["cdylib"]
 
 [dependencies]
-salamander_db = { package = "salamander-db", path = "../salamander" }
+# path for local builds; version so a published sdist resolves salamander-db
+# from crates.io (maturin rewrites the path away in the sdist).
+salamander_db = { package = "salamander-db", path = "../salamander", version = "0.1" }
 serde_json = "1"
 
 [dependencies.pyo3]
