@@ -1,4 +1,4 @@
-//! M2 exit test — IMPLEMENTATION.md Step 5.
+//! Replay behavior through the public API.
 //! Put/get survives a process restart, through the public `Salamander` API.
 
 use salamander::agent::{EventBody, KvProjection};

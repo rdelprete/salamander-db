@@ -1,4 +1,4 @@
-//! M1 exit test — IMPLEMENTATION.md Step 3/5.
+//! Append, close, and reopen round trip through the public API.
 //! Append/close/reopen round-trip through the public `Salamander` API.
 //! Segment-roll-specific coverage (forcing a roll needs a tiny
 //! `segment_max_bytes`, not exposed on the public API) lives in

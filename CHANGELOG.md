@@ -4,6 +4,42 @@ All notable changes to `salamander-db` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Paged replay livelock** — `next_page` never reported `done` when the
+  records past the last yielded one were all filtered out by the reader's
+  branch scope (e.g. replaying the default timeline while a fork's events
+  sit at the tail of the log). The page continuation now adopts the
+  reader's continuation on an exhausted scan; a facade regression test
+  drains both directions (default-over-branch-tail and
+  branch-over-default-tail).
+
+### Added
+
+- **`fork(namespace, at, parent=…)` in the Python binding** — an optional
+  `parent` branch name selects the timeline to fork from; it defaults to the
+  root timeline, so this is backward compatible. The engine always supported
+  forking any branch (`fork_branch`), so this only exposes an existing
+  capability: forks of forks now work from Python, with `branch_ancestry`
+  returning the full multi-level chain.
+- **Python showcase demos** — `examples/py/chat.py` (a chat CLI where
+  `/rewind`, `/fork`, `/branches`, `/switch`, and `/diff` are storage
+  primitives; talks to the Claude API when available, deterministic mock
+  otherwise) and `examples/py/unkillable_agent.py` (a self-supervising
+  agent that is hard-killed mid-task and resumes from replay with
+  exactly-once steps), each with an offline pytest suite. See
+  [docs/specs/python-showcase-demos.md](docs/specs/python-showcase-demos.md).
+- **The Undying Dungeon** — `examples/py/dungeon.py`, a browser roguelike
+  served from the standard library alone: each turn is one atomic batch with
+  recorded rolls (replay is deterministic), the timeline scrubber is
+  `view_at`, dying forks a new future over the shared past, and a
+  pull-the-plug button (`os._exit` mid-write) demonstrates crash-proof
+  recovery. The bestiary panel is a registered view — a secondary index the
+  engine maintains, queried without replaying the log. Sixteen offline tests;
+  see [docs/specs/dungeon-demo.md](docs/specs/dungeon-demo.md).
+
 ## [0.1.0] — unreleased
 
 First public release. The engine ships with the complete post-v0.1
@@ -97,9 +133,10 @@ stable on-disk format through instant recovery.
 
 - Workspace test suite spanning unit, property-based (proptest), golden
   fixture, and integration tests; a `kill -9` crash harness over append,
-  batch, snapshot publication, and heal paths; criterion benchmarks for open
-  time, replay selectivity, snapshot restore, and instant recovery
-  (`cargo bench -p salamander-db`).
+  batch, snapshot publication, and heal paths, with a readiness handshake
+  that targets each operation and deterministic scenario rotation; criterion
+  benchmarks for open time, replay selectivity, snapshot restore, and instant
+  recovery (`cargo bench -p salamander-db`).
 
 ### Not in this release (by design)
 

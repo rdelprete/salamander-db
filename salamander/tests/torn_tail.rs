@@ -1,4 +1,4 @@
-//! M1 exit test — IMPLEMENTATION.md Step 2/3/5.
+//! Torn-tail recovery through the public API.
 //! Torn-tail recovery (DESIGN.md §6, case C1) through the public
 //! `Salamander` API. Segment-roll-crossing recovery specifically needs a
 //! tiny `segment_max_bytes` (not exposed on the public API) to exercise

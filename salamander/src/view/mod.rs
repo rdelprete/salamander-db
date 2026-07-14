@@ -5,8 +5,8 @@
 //! back a snapshot (Phase 1's model), the DB *owns* registered **views**
 //! and fans every appended event out to them synchronously, so a query
 //! never sees a stale view (INV-2). Because a view is a fold, it inherits
-//! every guarantee the log already has: INV-1 covers it, the M4 crash
-//! harness covers it, and `log/` still interprets nothing.
+//! every guarantee the log already has: INV-1 and the crash harness cover
+//! it, and `log/` still interprets nothing.
 //!
 //! This module defines the object-safe [`View`] trait the registry drives,
 //! and [`IndexedView`] — the batteries-included queryable view with

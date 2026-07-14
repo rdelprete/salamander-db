@@ -243,10 +243,23 @@ impl Salamander {
         })
     }
 
-    fn fork(&self, py: Python<'_>, namespace: &str, at: u64) -> PyResult<String> {
-        py.allow_threads(|| {
+    #[pyo3(signature = (namespace, at, parent=None))]
+    fn fork(
+        &self,
+        py: Python<'_>,
+        namespace: &str,
+        at: u64,
+        parent: Option<&str>,
+    ) -> PyResult<String> {
+        py.allow_threads(|| -> Result<_, EngineError> {
+            // The engine forks from any parent branch; default to the root
+            // timeline when no parent is named, so fork-of-a-fork just works.
+            let parent_id = match parent {
+                None => [0; 16],
+                Some(name) => self.engine.branch_named(name.to_string())?.id,
+            };
             self.engine.fork(
-                [0; 16],
+                parent_id,
                 at,
                 format!("{namespace}-fork-{at}"),
                 BTreeMap::new(),

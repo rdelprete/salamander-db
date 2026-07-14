@@ -1,4 +1,4 @@
-//! M4 — IMPLEMENTATION.md Step 6.
+//! Property tests for corruption and recovery behavior.
 //!
 //! Record-level framing properties (round-trip, corruption-never-silent)
 //! live in `src/log/record.rs`'s own test module (Step 1); segment-level

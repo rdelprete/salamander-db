@@ -36,7 +36,9 @@ cargo test --workspace --all-targets
 
 Changes to the log, recovery, batches, snapshots, or healing must also pass
 the crash harness (`.github/workflows/crash.yml` runs it; locally:
-`cargo run -p salamander-demo -- crashtest parent`).
+`cargo run -p salamander-demo -- crashtest parent <dir>`). The default runs
+append, batch, snapshot, and healing scenarios; append one scenario name to
+run it alone.
 
 For Python-facing changes, build the extension with maturin and run the
 suite under `salamander-py/tests/`.

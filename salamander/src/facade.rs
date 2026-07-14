@@ -1700,7 +1700,16 @@ fn next_page(
     let mut records = Vec::new();
     let mut bytes = 0usize;
     let mut continuation = state.continuation;
-    while let Some(record) = reader.next_owned().map_err(EngineError::from)? {
+    loop {
+        let Some(record) = reader.next_owned().map_err(EngineError::from)? else {
+            // Exhausted scan: adopt the reader's continuation, which has
+            // advanced past records its filters skipped (e.g. another
+            // branch's events at the tail). Leaving `continuation` at the
+            // last *yielded* record would keep `done` false forever and
+            // livelock paging loops.
+            continuation = continuation.max(reader.continuation());
+            break;
+        };
         let stream = record
             .envelope
             .metadata

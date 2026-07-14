@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Undying Dungeon · SalamanderDB</title>
+<style>
+  :root {
+    --bg: #14110f; --panel: #1e1a17; --ink: #e8ddcf; --dim: #9a8f80;
+    --wall: #2b2621; --floor: #191512; --accent: #e0603a; --accent2: #6cae86;
+    --line: #33291f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.5 ui-sans-serif, system-ui, sans-serif; padding: 20px;
+  }
+  h1 { font-size: 20px; margin: 0 0 2px; letter-spacing: .3px; }
+  h1 .sal { color: var(--accent); }
+  .sub { color: var(--dim); font-size: 13px; margin-bottom: 16px; }
+  .wrap { display: flex; gap: 20px; flex-wrap: wrap; align-items: flex-start; }
+  .board {
+    display: grid; gap: 2px; background: var(--line); padding: 6px;
+    border-radius: 8px; user-select: none;
+  }
+  .cell {
+    width: 40px; height: 40px; display: grid; place-items: center;
+    font-size: 24px; background: var(--floor); border-radius: 4px;
+  }
+  .cell.wall { background: var(--wall); }
+  .cell.ghost { opacity: .9; }
+  .ghost-mark { position: relative; }
+  .ghost-mark::after {
+    content: "👻"; position: absolute; font-size: 18px; opacity: .5;
+    right: 0; bottom: -2px;
+  }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 14px; min-width: 240px;
+  }
+  .panel h2 {
+    font-size: 12px; text-transform: uppercase; letter-spacing: .8px;
+    color: var(--dim); margin: 0 0 8px;
+  }
+  .panel + .panel { margin-top: 14px; }
+  .stat { display: flex; justify-content: space-between; margin: 3px 0; }
+  .hearts { letter-spacing: 1px; }
+  .banner {
+    padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; font-weight: 600;
+    display: none;
+  }
+  .banner.win { background: #23361f; color: var(--accent2); display: block; }
+  .banner.dead { background: #3a1f18; color: var(--accent); display: block; }
+  .banner.dead .hint { font-weight: 400; color: var(--ink); font-size: 13px; }
+  .tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+  .tab {
+    padding: 4px 10px; border-radius: 999px; background: var(--floor);
+    border: 1px solid var(--line); color: var(--dim); cursor: pointer;
+    font-size: 13px;
+  }
+  .tab.active { color: var(--ink); border-color: var(--accent); }
+  .scrub { display: flex; align-items: center; gap: 10px; margin: 14px 0 4px; }
+  .scrub input[type=range] { flex: 1; accent-color: var(--accent); }
+  button.act {
+    background: var(--floor); color: var(--ink); border: 1px solid var(--line);
+    border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 13px;
+  }
+  button.act:hover { border-color: var(--accent2); }
+  button.danger { border-color: #5a2318; color: var(--accent); }
+  button.danger:hover { background: #3a1f18; }
+  button:disabled { opacity: .4; cursor: default; }
+  .log {
+    font: 12px/1.5 ui-monospace, monospace; color: var(--dim);
+    max-height: 200px; overflow-y: auto; white-space: pre-wrap;
+  }
+  .log .k { color: var(--accent2); }
+  .foot { color: var(--dim); font-size: 12px; margin-top: 16px; max-width: 640px; }
+  .foot code { color: var(--ink); }
+  label.ghost-toggle { font-size: 13px; color: var(--dim); cursor: pointer; }
+</style>
+</head>
+<body>
+  <h1>The Undying <span class="sal">Dungeon</span></h1>
+  <div class="sub">Every move is an event · the board is a replay · dying is a fork, not a reload</div>
+
+  <div id="banner" class="banner"></div>
+
+  <div class="tabs" id="tabs"></div>
+
+  <div class="wrap">
+    <div>
+      <div id="board" class="board"></div>
+      <div class="scrub">
+        <button class="act" id="playback" title="replay the run">▶</button>
+        <input type="range" id="slider" min="0" max="0" value="0">
+        <span id="turnlabel" style="min-width:96px;text-align:right;color:var(--dim)"></span>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center;margin-top:6px">
+        <button class="act" id="forkbtn" disabled>⑂ Branch here</button>
+        <label class="ghost-toggle"><input type="checkbox" id="ghost"> show ghost of <select id="ghostsel"></select></label>
+        <span id="notify" style="color:var(--accent2);font-size:13px"></span>
+      </div>
+      <div id="forkhint" style="color:var(--dim);font-size:12px;margin-top:4px;min-height:16px"></div>
+    </div>
+
+    <div style="flex:1;min-width:260px">
+      <div class="panel">
+        <h2>Adventurer</h2>
+        <div class="stat"><span>Health</span><span class="hearts" id="hp"></span></div>
+        <div class="stat"><span>Inventory</span><span id="inv">—</span></div>
+        <div class="stat"><span>Timeline</span><span id="branchlabel">main</span></div>
+      </div>
+      <div class="panel">
+        <h2>Bestiary · engine index (main line)</h2>
+        <div id="bestiary"></div>
+        <div style="color:var(--dim);font-size:11px;margin-top:6px">
+          A registered view — answered without replaying the log.
+        </div>
+      </div>
+      <div class="panel">
+        <h2>Event log · tail</h2>
+        <div class="log" id="log"></div>
+      </div>
+      <div class="panel">
+        <h2>Durability</h2>
+        <button class="act danger" id="crash">💀 Pull the plug</button>
+        <div style="color:var(--dim);font-size:11px;margin-top:6px">
+          Kills the server mid-write. Relaunch <code>dungeon.py</code> and reload —
+          nothing is lost.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="foot">
+    Moving into a monster attacks it; grab the 🗝️ and reach the 🚪. When you die,
+    drag the slider back and press <b>⑂ Branch here</b> to try a different line —
+    the original run stays intact. This whole game is a thin UI over an
+    append-only log; there is no save file to corrupt.
+  </div>
+
+<script>
+const EMOJI = {
+  player: "🧙", rat: "🐀", bat: "🦇", salamander: "🦎",
+  key: "🗝️", potion: "🧪", gold: "💰",
+};
+let MAP = null, current = "main", viewingTurn = null, latest = null, playing = false;
+
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  return res.json();
+}
+
+function branchQuery(turn) {
+  let q = "?branch=" + encodeURIComponent(current);
+  if (turn !== null && turn !== undefined) q += "&turn=" + turn;
+  return q;
+}
+
+async function refresh(turn) {
+  const state = await api("/state" + branchQuery(turn));
+  render(state, turn);
+}
+
+function render(state, turn) {
+  MAP = state.map;
+  latest = state;
+  const atHead = (turn === null || turn === undefined || turn === state.num_turns);
+  viewingTurn = atHead ? null : turn;
+
+  // board
+  const board = document.getElementById("board");
+  board.style.gridTemplateColumns = `repeat(${MAP[0].length}, 40px)`;
+  board.innerHTML = "";
+  const cells = [];
+  for (let r = 0; r < MAP.length; r++) {
+    for (let c = 0; c < MAP[r].length; c++) {
+      const div = document.createElement("div");
+      div.className = "cell" + (MAP[r][c] === "#" ? " wall" : "");
+      cells.push(div); board.appendChild(div);
+    }
+  }
+  const at = (r, c) => cells[r * MAP[0].length + c];
+  // door + items + entities
+  if (state.door) at(state.door.pos[0], state.door.pos[1]).textContent = state.door.open ? "🔓" : "🚪";
+  for (const [name, item] of Object.entries(state.items)) {
+    if (!item.taken) at(item.pos[0], item.pos[1]).textContent = EMOJI[name];
+  }
+  for (const [id, e] of Object.entries(state.entities)) {
+    if (e.alive) at(e.pos[0], e.pos[1]).textContent = EMOJI[e.type];
+  }
+  if (window._ghost) {
+    const g = window._ghost;
+    const cell = at(g[0], g[1]);
+    cell.classList.add("ghost-mark");
+  }
+
+  // panels
+  const p = state.entities.player;
+  const full = Math.round(p.hp / 2), hp = document.getElementById("hp");
+  hp.textContent = (p.hp > 0 ? "❤️".repeat(Math.ceil(p.hp / 4)) : "💀") + ` ${p.hp}/${p.max_hp}`;
+  document.getElementById("inv").textContent =
+    state.inventory.length ? state.inventory.map(i => EMOJI[i]).join(" ") : "—";
+  document.getElementById("branchlabel").textContent = state.branch;
+
+  const best = state.bestiary.counts;
+  document.getElementById("bestiary").innerHTML = Object.entries(best)
+    .map(([t, n]) => `<div class="stat"><span>${EMOJI[t]} ${t}</span><span>${n}</span></div>`)
+    .join("") + `<div class="stat" style="border-top:1px solid var(--line);margin-top:4px;padding-top:4px"><span>total felled</span><span>${state.bestiary.total}</span></div>`;
+
+  document.getElementById("log").innerHTML = (state.log || [])
+    .map(b => `<div><span class="k">${b.kind}</span> ${fmt(b)}</div>`).join("");
+
+  // banner
+  const banner = document.getElementById("banner");
+  banner.className = "banner";
+  if (state.status === "won") { banner.classList.add("win"); banner.textContent = "🏆 You escaped the dungeon!"; }
+  else if (state.status === "dead") {
+    banner.classList.add("dead");
+    banner.innerHTML = "☠️ You died. <span class='hint'>Drag the timeline back and press ⑂ Branch here to try another way — this run stays as it happened.</span>";
+  }
+
+  // scrubber
+  const slider = document.getElementById("slider");
+  slider.max = state.num_turns;
+  slider.value = (viewingTurn === null ? state.num_turns : viewingTurn);
+  document.getElementById("turnlabel").textContent =
+    `turn ${slider.value} / ${state.num_turns}`;
+  // Branch from anywhere — main or a fork of a fork. Only requirement:
+  // scrub back to the point you want to branch from.
+  const forkbtn = document.getElementById("forkbtn");
+  forkbtn.disabled = (viewingTurn === null);
+  const hint = document.getElementById("forkhint");
+  if (viewingTurn === null) hint.textContent = "Scrub the timeline back, then branch a new future from that point.";
+  else hint.textContent = `Ready to branch a new timeline from turn ${viewingTurn} of ${state.branch}.`;
+
+  renderTabs(state.branches);
+  renderGhostOptions(state.branches);
+}
+
+let _notifyTimer = null;
+function notify(msg) {
+  const el = document.getElementById("notify");
+  el.textContent = msg;
+  clearTimeout(_notifyTimer);
+  _notifyTimer = setTimeout(() => { el.textContent = ""; }, 4000);
+}
+
+function fmt(b) {
+  const parts = [];
+  for (const [k, v] of Object.entries(b)) {
+    if (k === "kind" || k === "turn") continue;
+    parts.push(`${k}=${JSON.stringify(v)}`);
+  }
+  return parts.join(" ");
+}
+
+function renderTabs(branches) {
+  const tabs = document.getElementById("tabs");
+  const all = ["main", ...branches];
+  tabs.innerHTML = "";
+  for (const b of all) {
+    const el = document.createElement("div");
+    el.className = "tab" + (b === current ? " active" : "");
+    el.textContent = b === "main" ? "🌱 main" : "⑂ " + b;
+    el.onclick = () => { current = b; window._ghost = null; refresh(null); };
+    tabs.appendChild(el);
+  }
+}
+
+function renderGhostOptions(branches) {
+  const sel = document.getElementById("ghostsel");
+  const opts = ["main", ...branches].filter(b => b !== current);
+  sel.innerHTML = opts.map(b => `<option value="${b}">${b}</option>`).join("");
+}
+
+async function updateGhost() {
+  const on = document.getElementById("ghost").checked;
+  if (!on) { window._ghost = null; return refresh(viewingTurn); }
+  const other = document.getElementById("ghostsel").value;
+  const turn = viewingTurn === null ? "" : "&turn=" + viewingTurn;
+  const st = await api(`/state?branch=${encodeURIComponent(other)}${turn}`);
+  window._ghost = st.entities.player.pos;
+  await refresh(viewingTurn);
+}
+
+let moving = false;
+async function move(dir) {
+  if (viewingTurn !== null || moving) return;   // read-only while scrubbed; one turn at a time
+  moving = true;
+  try {
+    const res = await api("/action" + branchQuery(), {
+      method: "POST", body: JSON.stringify({ move: dir }),
+    });
+    if (res.ok) render(res, null);
+  } finally {
+    moving = false;
+  }
+}
+
+document.addEventListener("keydown", (e) => {
+  if (e.repeat) return;                          // ignore held-key auto-repeat
+  const map = { ArrowUp: "N", ArrowDown: "S", ArrowLeft: "W", ArrowRight: "E",
+                w: "N", s: "S", a: "W", d: "E", W: "N", S: "S", A: "W", D: "E" };
+  if (map[e.key]) { e.preventDefault(); move(map[e.key]); }
+  else if (e.key === "[") step(-1);
+  else if (e.key === "]") step(1);
+});
+
+function step(delta) {
+  const slider = document.getElementById("slider");
+  const v = Math.max(0, Math.min(latest.num_turns, Number(slider.value) + delta));
+  refresh(v === latest.num_turns ? null : v);
+}
+
+document.getElementById("slider").addEventListener("input", (e) => {
+  const v = Number(e.target.value);
+  refresh(v === latest.num_turns ? null : v);
+});
+
+document.getElementById("forkbtn").onclick = async () => {
+  let res;
+  try {
+    res = await api("/fork" + branchQuery(), {
+      method: "POST", body: JSON.stringify({ at_turn: viewingTurn }),
+    });
+  } catch (e) { notify("couldn't reach the server"); return; }
+  if (!res.ok) { notify(res.reason || res.error || "couldn't branch here"); return; }
+  current = res.branch; window._ghost = null;
+  notify(res.created ? `branched → ${res.branch}`
+                     : `already branched here → switched to ${res.branch}`);
+  await refresh(null);
+};
+
+document.getElementById("playback").onclick = async () => {
+  if (playing) { playing = false; return; }
+  playing = true;
+  for (let t = 0; t <= latest.num_turns && playing; t++) {
+    await refresh(t === latest.num_turns ? null : t);
+    await new Promise(r => setTimeout(r, 320));
+  }
+  playing = false;
+};
+
+document.getElementById("ghost").onchange = updateGhost;
+document.getElementById("ghostsel").onchange = updateGhost;
+
+document.getElementById("crash").onclick = async () => {
+  if (!confirm("Pull the plug? The server dies mid-write. Relaunch dungeon.py and reload — nothing will be lost.")) return;
+  try { await api("/crash", { method: "POST", body: "{}" }); } catch (e) {}
+  document.body.innerHTML = "<h1 style='color:#e0603a'>💀 Process killed mid-write.</h1><p style='color:#9a8f80'>Relaunch <code>python examples/py/dungeon.py</code> and reload this page. The run — every timeline — will be exactly where you left it, because the log is the only durable structure and it cannot be half-written.</p>";
+};
+
+refresh(null);
+</script>
+</body>
+</html>

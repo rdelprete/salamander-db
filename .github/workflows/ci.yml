@@ -49,4 +49,7 @@ jobs:
           .venv/bin/python -m pytest
           examples/py/test_roundtrip.py
           examples/py/test_query_and_fork.py
+          examples/py/test_chat.py
+          examples/py/test_unkillable_agent.py
+          examples/py/test_dungeon.py
           -v

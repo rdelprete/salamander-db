@@ -238,3 +238,62 @@ fn branch_pages_and_declarative_queries_are_engine_semantics() {
     assert_eq!(result.rows, vec![br#"{"id":"a","kind":"user"}"#.to_vec()]);
     assert_eq!(engine.query(query, QueryOperation::Len).unwrap().len, 1);
 }
+
+/// Paging must report `done` even when the records past the last yielded one
+/// are all filtered out by the reader's branch scope — a page whose
+/// continuation never reaches head would livelock every drain loop.
+#[test]
+fn paged_replay_terminates_when_filtered_records_trail_the_scan() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = Engine::open(EngineOptions::new(dir.path())).unwrap();
+    engine
+        .append(batch("chat", vec![1], PayloadCodec::Bytes))
+        .unwrap();
+    engine
+        .append(batch("chat", vec![2], PayloadCodec::Bytes))
+        .unwrap();
+    let branch = engine
+        .fork([0; 16], 1, "alternative".into(), BTreeMap::new())
+        .unwrap();
+    let mut child = batch("chat", vec![3], PayloadCodec::Bytes);
+    child.branch_id = branch.id;
+    engine.append(child).unwrap();
+
+    let drain = |request: ReplayRequest| {
+        let reader = engine.open_reader(request).unwrap();
+        let mut positions = Vec::new();
+        for pages in 0.. {
+            assert!(pages < 4, "paging never reported done");
+            let page = engine.next_page(reader).unwrap();
+            positions.extend(page.records.iter().map(|record| record.position));
+            if page.done {
+                break;
+            }
+        }
+        positions
+    };
+
+    // Default-timeline replay: the log's tail (position 2) belongs to the
+    // fork, so the scope filter yields nothing there.
+    assert_eq!(
+        drain(ReplayRequest {
+            stream: Some("chat".into()),
+            ..ReplayRequest::default()
+        }),
+        vec![0, 1]
+    );
+
+    // Mirror case: the branch replays under its ancestry scope while the
+    // log's tail is a default-timeline event past the fork point.
+    engine
+        .append(batch("chat", vec![4], PayloadCodec::Bytes))
+        .unwrap();
+    assert_eq!(
+        drain(ReplayRequest {
+            branch_id: branch.id,
+            stream: Some("chat".into()),
+            ..ReplayRequest::default()
+        }),
+        vec![0, 2]
+    );
+}

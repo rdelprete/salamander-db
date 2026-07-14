@@ -124,7 +124,7 @@ cargo run -p salamander-demo -- session
 <summary>What it prints — a debugging session, forked at the root-cause decision</summary>
 
 ```
-SalamanderDB — session demo (M3)
+SalamanderDB — session demo
 
 ▶ Recorded a debugging session under namespace "debug-session":
 
@@ -174,6 +174,28 @@ directory, and verifies every record survived:
 ```
 cargo run --release -p salamander-demo -- storm   # 1,000,000 events (pass a count to change)
 ```
+
+Python demos make the same points from the other side of the FFI (build the
+extension first — see [`salamander-py/`](salamander-py)):
+
+```
+python examples/py/dungeon.py            # browser roguelike: rewind is a replay,
+                                         # dying is a fork, the save can't corrupt
+python examples/py/chat.py               # chat CLI: /rewind, /fork, /diff — the
+                                         # "edit and regenerate" feature as storage
+python examples/py/unkillable_agent.py   # an agent hard-killed twice mid-task;
+                                         # resumes from replay, every step exactly once
+```
+
+**The Undying Dungeon** (`dungeon.py`) serves a one-page game at
+`http://127.0.0.1:7172` with no dependencies beyond the standard library:
+every move is an event, the timeline scrubber is `view_at(n)`, and when you
+die you drag back and *fork* a new future over the shared past. A red button
+pulls the plug — `os._exit` mid-write — and relaunching resumes exactly,
+because the log is the only durable structure. The chat demo talks to the
+Claude API when `ANTHROPIC_API_KEY` is set (and `anthropic` is installed),
+falling back to a deterministic offline mock; its directory persists,
+branches and all, across runs.
 
 ## Performance
 

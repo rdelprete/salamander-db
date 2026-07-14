@@ -1,4 +1,4 @@
-//! M5 — IMPLEMENTATION.md Step 7 / DESIGN.md §9.
+//! Cold-open and eager-replay scaling benchmark.
 //!
 //! Criterion bench: cold-start cost vs. log size — the "baseline villain"
 //! that motivates Phase 2 (DESIGN.md §9, §8). Two measurements per size:
@@ -12,7 +12,7 @@
 //!
 //! Sizes come from the `SALAMANDER_BENCH_SIZES` env var (comma-separated
 //! event counts); the default is a quick `100000,1000000`. The canonical
-//! M5 run is:
+//! large-scale run is:
 //!
 //! ```text
 //! SALAMANDER_BENCH_SIZES=1000000,10000000,50000000 cargo bench --bench open_time

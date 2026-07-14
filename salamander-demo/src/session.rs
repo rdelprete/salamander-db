@@ -1,4 +1,4 @@
-//! IMPLEMENTATION.md Step 5 — M3 flagship demo.
+//! Flagship branching-session demo.
 //!
 //! Scripts a fake agent debugging session, prints the transcript, then
 //! forks at the root-cause decision and shows the parent and the fork
@@ -133,7 +133,7 @@ pub fn run() {
     db.commit().expect("commit parent");
 
     // ── 3. Print the full parent session, marking the fork point ────────
-    println!("SalamanderDB — session demo (M3)\n");
+    println!("SalamanderDB — session demo\n");
     println!("▶ Recorded a debugging session under namespace \"{PARENT}\":\n");
     print_raw_stream(&db, PARENT, fork_point);
 

@@ -1,5 +1,5 @@
 //! DESIGN.md §5 — SessionProjection: per-namespace agent session view. The
-//! demo workhorse (M3 flagship). Namespace filtering happens in `apply` —
+//! branching-session demo workhorse. Namespace filtering happens in `apply` —
 //! the projection ignores events from other namespaces.
 //!
 //! A projection over `EventBody`: its `Projection::Body` associated type

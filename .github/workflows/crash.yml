@@ -1,4 +1,4 @@
-name: Crash harness (M4 conscience test)
+name: Crash harness
 
 on:
   schedule:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       iterations:
-        description: "Number of kill-9 iterations"
+        description: "Number of process-kill iterations"
         required: false
         default: "200"
 

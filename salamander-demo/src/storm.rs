@@ -1,8 +1,8 @@
-//! IMPLEMENTATION.md Step 3 / DESIGN.md §9 — the M1 write-storm demo.
+//! Large-volume write, reopen, and replay demo.
 //!
 //! Appends N events, closes the DB, reopens it (full recovery), then scans
 //! every record back and verifies the stream round-tripped intact. This is
-//! the M1 artifact: proof the log survives a large volume across a
+//! proof that the log survives a large volume across a
 //! close/reopen cycle, and the first honest recovery-time numbers.
 //!
 //! Usage: `salamander-demo storm [count]` (default 1,000,000).
@@ -29,7 +29,7 @@ pub fn run(mut args: impl Iterator<Item = String>) {
     let dir = scratch_dir();
     let _ = std::fs::remove_dir_all(&dir); // fresh start if a prior run left it behind
 
-    println!("SalamanderDB — write storm (M1)\n");
+    println!("SalamanderDB — write storm\n");
     println!("▶ Appending {count} events under {}…", dir.display());
 
     // ── 1. Write the storm ──────────────────────────────────────────────
@@ -59,8 +59,8 @@ pub fn run(mut args: impl Iterator<Item = String>) {
     );
 
     // ── 3. Rebuild derived state: a full-log projection replay ──────────
-    // This is the O(log-size) cost that `open` itself defers — the M5
-    // "baseline villain" and the motivation for Phase 2's snapshots.
+    // This is the O(log-size) eager-replay cost that `open` itself defers,
+    // and the motivation for verified projection snapshots.
     let t_replay = Instant::now();
     let kv = db.projection::<KvProjection>().expect("projection");
     let replay_elapsed = t_replay.elapsed();
@@ -109,8 +109,8 @@ pub fn run(mut args: impl Iterator<Item = String>) {
     println!("  stream digest OK (0x{digest:016x})");
     println!(
         "\n  Note: log recovery is cheap and roughly flat — `open` only scans the\n  \
-         active segment. The replay is the linear cost (the M5 baseline villain),\n  \
-         which Phase 2's projection snapshots exist to erase."
+         active segment. The replay is the linear eager-rebuild cost that\n  \
+         projection snapshots exist to erase."
     );
 
     let _ = std::fs::remove_dir_all(&dir);

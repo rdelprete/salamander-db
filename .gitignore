@@ -8,6 +8,8 @@ LOCK
 .DS_Store
 # Local playground data dirs
 salamander-playground/
+chat-mem/
+dungeon-mem/
 
 release-readme.md
 

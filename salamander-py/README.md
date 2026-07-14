@@ -57,7 +57,7 @@ forward-compatible).
 | `db.register_view(name, key, indexes={}, where_field=, where_value=)` | register an `IndexedView` |
 | `db.view(name) -> View` | typed query handle |
 | `db.deregister_view(name) -> bool` | `deregister` |
-| `db.fork(namespace, at) -> str` | create branch (returns branch name) |
+| `db.fork(namespace, at, parent=None) -> str` | create branch off `parent` (default: root timeline); forks of forks supported |
 | `db.history(namespace) -> list[dict]` | default-branch replay |
 | `db.branch_history(branch, namespace) -> list[dict]` | inherited branch replay |
 
@@ -115,8 +115,13 @@ are declared by field name (primary `key`, `indexes` mapping name→field, an
 optional `where_field`/`where_value` filter) — no per-event Python callback
 crosses the FFI boundary.
 
-A LangGraph checkpointer that survives process restarts ships in
-[`examples/py/`](../examples/py); an MCP server is on the
+Demos ship in [`examples/py/`](../examples/py): `dungeon.py` (a browser
+roguelike where rewind is a replay, dying is a fork, and a pull-the-plug
+button proves the save can't corrupt), `chat.py` (a chat CLI where rewind,
+fork, and timeline diff are storage primitives — Claude API when available,
+offline mock otherwise), `unkillable_agent.py` (an agent hard-killed
+mid-task that resumes from replay with exactly-once steps), and a LangGraph
+checkpointer that survives process restarts. An MCP server is on the
 [roadmap](../ROADMAP.md). Branch lifecycle and ancestry use the same engine
 catalog as Rust:
 

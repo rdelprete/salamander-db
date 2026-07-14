@@ -1,5 +1,5 @@
 //! DESIGN.md §7 — the public API surface: open, append, commit, projection
-//! access, view_at. M2/M3.
+//! access, and `view_at`.
 //!
 //! `Salamander<B>` is the payload-generic engine (P1). It frames and
 //! persists bodies of any [`Body`] type without interpreting them; the

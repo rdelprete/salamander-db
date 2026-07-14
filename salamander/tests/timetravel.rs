@@ -1,4 +1,4 @@
-//! M3 exit test — IMPLEMENTATION.md Step 5.
+//! Time-travel and fork behavior through the public API.
 //! view_at(n) equals a fold stopped at n; fork diverges without disturbing
 //! the parent namespace (DESIGN.md §5).
 

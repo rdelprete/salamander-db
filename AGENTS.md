@@ -23,7 +23,9 @@ cargo test --workspace --all-targets
 ```
 
 Changes to the log, recovery, batches, snapshots, or healing must also pass
-the crash harness (`cargo run -p salamander-demo -- crashtest parent`).
+the crash harness (`cargo run -p salamander-demo -- crashtest parent <dir>`).
+The default runs append, batch, snapshot, and healing scenarios; pass one of
+those names after `<dir>` to run a single scenario.
 
 ## Style
 

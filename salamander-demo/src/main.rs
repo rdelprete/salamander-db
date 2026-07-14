@@ -1,7 +1,6 @@
-//! IMPLEMENTATION.md §1 — demo + crash-harness binary. Subcommands:
-//! `session` (M3 flagship), `storm` (M1/M2 write-storm fixture generator),
-//! `crashtest child|parent` (M4 conscience harness), `ui` (local
-//! playground: browser UI over a JsonDb).
+//! Demo and crash-harness binary. Subcommands: `session` (branching agent
+//! session), `storm` (large write/reopen fixture), `crashtest worker|parent`
+//! (real-process recovery harness), and `ui` (local JsonDb playground).
 
 mod crash;
 mod migrate;
