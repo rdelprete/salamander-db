@@ -197,11 +197,14 @@ because the log is the only durable structure.
 The 20-second tour — fight, rewind, fork, diverge, pull the plug, reload
 intact:
 
-<!-- Rendered as an inline player on GitHub; falls back to a clickable
-     poster elsewhere. Regenerate with examples/py/record_demo.py. -->
-<video src="https://github.com/rdelprete/salamander-db/raw/main/docs/assets/dungeon-demo.mp4" controls muted width="720" poster="docs/assets/dungeon-demo-poster.png">
-  <a href="docs/assets/dungeon-demo.mp4"><img src="docs/assets/dungeon-demo-poster.png" alt="The Undying Dungeon — 20-second tour" width="720"></a>
-</video>
+<!-- GitHub renders this uploaded-asset URL as a native inline player. The
+     committed source of truth is docs/assets/dungeon-demo.mp4 (regenerate
+     with examples/py/record_demo.py); if the player URL ever breaks,
+     re-upload that file to a comment and swap the URL. -->
+
+https://github.com/user-attachments/assets/27fd79bd-06a9-4cff-9473-7449ce79f6eb
+
+[▶ Full-size MP4](docs/assets/dungeon-demo.mp4)
 
 <sub>Nothing above is a save file: the board is a fold over the event log,
 the scrubber replays it, forking branches the timeline, and killing the
