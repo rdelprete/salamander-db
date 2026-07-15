@@ -20,7 +20,7 @@ use crate::format::{
     OwnedStoredRecord, RecordEnvelopeV2, StreamId, StreamRevision,
 };
 use crate::log::reader::{FrameFilter, ResolvedFilter};
-use crate::log::{Log, LogReader, RecordReader, ReplayEnd, ReplayPlan};
+use crate::log::{Log, LogReader, RecordReader, ReplayEnd, ReplayPlan, StreamSelector};
 use crate::projection::{decode_stored_event, replay_into, NamespaceScoped, Projection};
 use crate::stream::{event_fingerprint, StreamCatalog};
 use crate::view::{catch_up, View};
@@ -513,6 +513,61 @@ impl<B: Body> Salamander<B> {
         self.branches.common_ancestor(left, right)
     }
 
+    /// The divergence of two timelines as an engine operation — a
+    /// position plus three replay plans, computed from the branch catalog
+    /// alone (`docs/specs/first-class-diff.md`). No record is read or
+    /// compared: two timelines are identical below the divergence position
+    /// by construction, because inherited replay is positional (DIFF-1).
+    /// Feed the returned plans to [`read`](Self::read) to enumerate the
+    /// shared prefix or either divergent suffix; computing the diff itself
+    /// performs no log I/O and writes nothing (DIFF-5).
+    pub fn diff(&self, request: DiffRequest) -> Result<TimelineDiff> {
+        request.streams.validate()?;
+        let head = self.log.head();
+        let resolve = |end: ReplayEnd| match end {
+            ReplayEnd::Head => Ok(head),
+            ReplayEnd::At(position) if position > head => {
+                Err(SalamanderError::OffsetBeyondHead(position))
+            }
+            ReplayEnd::At(position) => Ok(position),
+        };
+        let left_until = resolve(request.left_until)?;
+        let right_until = resolve(request.right_until)?;
+        let branch = |id: BranchId| {
+            self.branches
+                .get(id)
+                .cloned()
+                .ok_or_else(|| SalamanderError::BranchNotFound(format!("{id:?}")))
+        };
+        let left = branch(request.left)?;
+        let right = branch(request.right)?;
+        let (common_ancestor, divergence) =
+            self.branches
+                .divergence(request.left, left_until, request.right, right_until)?;
+        let plan = |branch: BranchId, from: u64, until: u64| ReplayPlan {
+            branch,
+            streams: request.streams.clone(),
+            from: Bound::Included(from),
+            until: ReplayEnd::At(until),
+            ..ReplayPlan::default()
+        };
+        Ok(TimelineDiff {
+            shared: plan(common_ancestor.id, 0, divergence),
+            common_ancestor,
+            divergence,
+            left: DiffSide {
+                suffix: plan(left.id, divergence, left_until),
+                branch: left,
+                until: left_until,
+            },
+            right: DiffSide {
+                suffix: plan(right.id, divergence, right_until),
+                branch: right,
+                until: right_until,
+            },
+        })
+    }
+
     /// Build a bounded-memory streaming reader for `plan` (WP-04). The
     /// plan's branch is resolved to its flattened ancestry scopes, so
     /// inherited parent history is visible through the fork point; every
@@ -825,6 +880,69 @@ impl<B: Body> Salamander<B> {
     ) -> Result<()> {
         crate::introspect::replay(&self.log, namespace, range, f)
     }
+}
+
+/// What to diff: two timelines, each a branch bounded by an exclusive
+/// until, plus a stream selector scoped onto the emitted plans. See
+/// [`Salamander::diff`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffRequest {
+    /// The left timeline's branch.
+    pub left: BranchId,
+    /// The right timeline's branch.
+    pub right: BranchId,
+    /// Exclusive upper bound of the left timeline (default: head).
+    pub left_until: ReplayEnd,
+    /// Exclusive upper bound of the right timeline (default: head).
+    pub right_until: ReplayEnd,
+    /// Which streams the emitted replay plans select. The divergence
+    /// position itself is positional and stream-independent.
+    pub streams: StreamSelector,
+}
+
+impl DiffRequest {
+    /// A whole-timeline diff of two branches at head, all streams.
+    pub fn new(left: BranchId, right: BranchId) -> Self {
+        Self {
+            left,
+            right,
+            left_until: ReplayEnd::Head,
+            right_until: ReplayEnd::Head,
+            streams: StreamSelector::All,
+        }
+    }
+}
+
+/// One side of a [`TimelineDiff`]: the branch, its resolved until, and the
+/// replay plan for its divergent suffix `[divergence, until)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffSide {
+    /// The branch this side describes.
+    pub branch: BranchInfo,
+    /// The resolved exclusive upper bound of this timeline.
+    pub until: u64,
+    /// Replay plan for this timeline's records past the divergence.
+    pub suffix: ReplayPlan,
+}
+
+/// The result of [`Salamander::diff`]: where two timelines share history
+/// and what each says after that — a position plus three replay plans.
+/// Both timelines replay identically below [`divergence`](Self::divergence)
+/// by construction; no record comparison is involved (DIFF-1, DIFF-6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimelineDiff {
+    /// The deepest branch node the two ancestries share.
+    pub common_ancestor: BranchInfo,
+    /// Exclusive upper bound of the shared history.
+    pub divergence: u64,
+    /// Replay plan for the shared prefix `[0, divergence)`, on the common
+    /// ancestor's timeline — resolving it against either side yields the
+    /// same records.
+    pub shared: ReplayPlan,
+    /// The left timeline's branch, until, and suffix plan.
+    pub left: DiffSide,
+    /// The right timeline's branch, until, and suffix plan.
+    pub right: DiffSide,
 }
 
 fn current_timestamp_ms() -> u64 {

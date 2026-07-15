@@ -2,13 +2,16 @@
 
 [![CI](https://github.com/rdelprete/salamander-db/actions/workflows/ci.yml/badge.svg)](https://github.com/rdelprete/salamander-db/actions/workflows/ci.yml)
 [![Crash harness](https://github.com/rdelprete/salamander-db/actions/workflows/crash.yml/badge.svg)](https://github.com/rdelprete/salamander-db/actions/workflows/crash.yml)
+[![crates.io](https://img.shields.io/crates/v/salamander-db.svg)](https://crates.io/crates/salamander-db)
+[![PyPI](https://img.shields.io/pypi/v/salamander-db.svg)](https://pypi.org/project/salamander-db/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**SQLite for event-sourced state — built first for agent memory.**
+**Durable execution history for stateful agents and applications.**
 
 SalamanderDB is an embedded event-sourcing engine written in Rust. It runs
 in your process like SQLite — no server, no subprocess — and stores your
-application's state as an append-only log of events. Everything else
+application's state as an append-only log of events. There is no server or
+subprocess to operate. Everything else
 (key/value state, indexes, query views) is a projection folded from that
 log, disposable and rebuildable by definition. Replay, time-travel, and
 fork are first-class operations: rewind any session to step N, branch it,
@@ -31,17 +34,41 @@ away. SalamanderDB keeps it:
 - **History is queryable.** `view_at(n)` answers "what did the world look
   like at step n" directly from the record, not from a reconstructed
   timeline.
-- **Fork is cheap.** Branch a session at any point and let two histories
-  diverge — the postmortem that lets you replay an incident against a fix.
+- **Fork is cheap — and diffable.** Branch a session at any point and let
+  two histories diverge — the postmortem that lets you replay an incident
+  against a fix. `diff` then reports the exact divergence point and each
+  side's suffix straight from the branch catalog, without comparing a
+  single record.
 
-Built first for **agent memory** (typed events for tool calls, model turns,
-decisions; a working LangGraph checkpointer), but the core is
-payload-generic: the second use case is **crash-proof application state**
-for any app that currently fears its own JSON or pickle checkpoint file.
+Built first for **agent execution memory**: the exact record of model turns,
+tool calls, decisions, and state transitions. SalamanderDB records what
+happened; it does not decide which facts an agent should recall. Semantic
+memory and retrieval systems can consume the log or a projection while the
+original execution history remains the source of truth. The core is payload-
+generic, so it also fits applications that have outgrown fragile JSON or
+pickle checkpoint files.
+
+### Is it a fit?
+
+| Use SalamanderDB when you need | Choose something else when you need |
+|---|---|
+| One embedded writer with crash-safe local state | Multiple processes or services writing the same database |
+| Exact replay, audit trails, time travel, or alternative branches | SQL analytics or ad hoc joins over application data |
+| Rebuildable projections over immutable events | Built-in semantic search, embeddings, or memory selection |
+| A Rust library or native Python extension with no server | A managed, network-accessible database service |
+
+The complete log is currently retained forever. Retention and compaction are
+planned but not available in v0.1; workloads with deletion or bounded-storage
+requirements should account for that before adopting it.
 
 ## Quick start
 
-Not yet on crates.io — build from source:
+```
+cargo add salamander-db       # Rust — https://crates.io/crates/salamander-db
+pip install salamander-db     # Python — prebuilt wheels for Linux, macOS, Windows
+```
+
+Or work from source:
 
 ```
 git clone https://github.com/rdelprete/salamander-db
@@ -74,8 +101,8 @@ fn main() -> salamander::Result<()> {
 
 Runnable, commented examples live in
 [`salamander/examples/`](salamander/examples) — key/value basics, custom
-payload types, query views (`get`/`range`/`prefix`/`by`), forking, and JSON
-payloads with commit policies:
+payload types, query views (`get`/`range`/`prefix`/`by`), forking, timeline
+diffs, and JSON payloads with commit policies:
 
 ```
 cargo run --example 01_kv_basics -p salamander
@@ -88,15 +115,18 @@ in-process handle:
 
 ```python
 import salamander
-db = salamander.open("./mem", commit_every_count=8)
-db.append("session-1", {"kind": "user_msg", "text": "hi"})
-for ev in db.replay("session-1"):
-    print(ev["offset"], ev["body"])   # -> plain dicts back out
+
+with salamander.open("./mem", commit_every_count=8) as db:
+    db.append("session-1", {"kind": "user_msg", "text": "hi"})
+    db.commit()
+    for ev in db.replay("session-1"):
+        print(ev["offset"], ev["body"])  # plain dictionaries back out
 ```
 
-Build with maturin — see [`salamander-py/`](salamander-py) and
-[`examples/py/`](examples/py), including a LangGraph checkpointer that
-survives a process restart.
+`pip install salamander-db` gets a prebuilt wheel (abi3, CPython 3.9+); to
+build from source with maturin see [`salamander-py/`](salamander-py). Python
+examples live in [`examples/py/`](examples/py), including a LangGraph
+checkpointer that survives a process restart.
 
 ### Demos
 
@@ -237,8 +267,8 @@ SALAMANDER_BENCH_SIZES=1000000,10000000 cargo bench -p salamander-db --bench ope
 
 ## Status and roadmap
 
-**The architecture is complete.** The full post-v0.1 design — built on a set
-of normative correctness contracts — is implemented and tested:
+**The core storage model is implemented.** The current focus is production
+hardening, integrations, and operational tooling. The v0.1 engine includes:
 
 - **Format v2** — stable engine envelope over opaque payloads, golden byte
   fixtures, offline v1 migration
@@ -264,10 +294,13 @@ Everything is defended by the workspace test suite (unit, property-based,
 golden-fixture, and integration tests) and a `kill -9` crash harness; see
 [CHANGELOG.md](CHANGELOG.md) for the full feature inventory.
 
-**What's next** — release engineering toward `v0.1.0` (crates.io, PyPI
-wheels, CI platform matrix), then background healing, a retention contract,
-replication adapters, and an MCP server. Permanently out of scope:
-multi-writer shared state across services. See [ROADMAP.md](ROADMAP.md).
+**What's next** — the crate is on
+[crates.io](https://crates.io/crates/salamander-db) and wheels are on
+[PyPI](https://pypi.org/project/salamander-db/); the remaining release
+engineering is a CI test matrix beyond Linux plus an MSRV job. Then
+background healing, a retention contract, replication adapters, and an MCP
+server. Permanently out of scope: multi-writer shared state across
+services. See [ROADMAP.md](ROADMAP.md).
 
 ## Documentation
 
@@ -276,6 +309,8 @@ multi-writer shared state across services. See [ROADMAP.md](ROADMAP.md).
 | [ROADMAP.md](ROADMAP.md) | What's next, what's demand-driven, what's permanently out of scope |
 | [CHANGELOG.md](CHANGELOG.md) | The full feature inventory of the current release |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Ground rules, the CI gates, and how to propose changes |
+| [Python usage guide](docs/python-usage.md) | Lifecycle, streaming, async applications, typing, and API discovery |
+| [Upgrade guide](docs/upgrading.md) | Versioning, on-disk compatibility, backups, and pre-1.0 upgrades |
 | [salamander/examples/](salamander/examples) | Runnable, commented Rust examples for every core operation |
 | [examples/py/](examples/py) | Python examples, including the LangGraph checkpointer |
 

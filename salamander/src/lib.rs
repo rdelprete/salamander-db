@@ -1,7 +1,8 @@
 //! SalamanderDB — an embedded event-sourcing engine with instant recovery.
 //!
-//! DESIGN.md §1 — the append-only log is the only durable structure;
-//! everything else is a rebuildable projection.
+//! The append-only log is the only durable structure; everything else is a
+//! rebuildable projection. Losing a catalog, index, projection, snapshot, or
+//! sidecar may change performance, but never answers.
 //!
 //! The engine is generic over its payload type: [`Salamander<B>`] frames,
 //! orders, and persists bodies of any [`Body`] type but never interprets
@@ -11,8 +12,10 @@
 //! module* over that engine, in [`agent`]. Agent users open an
 //! [`AgentDb`] and never see the type parameter.
 //!
-//! Phase 1 scope: log core, in-memory projections, full replay on open,
-//! time-travel, fork. See DESIGN.md and IMPLEMENTATION.md at the repo root.
+//! The crate also provides named streams, atomic batches, optimistic
+//! concurrency, idempotent retries, branches, streaming replay, verified
+//! snapshots, and a committed-batch feed. See the repository README and
+//! roadmap for guides, operational boundaries, and planned work.
 //!
 //! # Custom payloads
 //!
@@ -86,13 +89,13 @@ pub use event::{Body, Event};
 #[doc(hidden)]
 pub use facade::{
     AppendBatch as EngineAppendBatch, AppendReceiptDto as EngineAppendReceipt, BranchDto,
-    CommittedBatch, DurabilityDto, Engine, EngineError, EngineOptions, ErrorCategory, EventData,
-    ExpectedRevisionDto, FeedFilter, FeedHandle, FeedPage, FeedRequest, InputType, PartitionScheme,
-    PartitionStatus, PayloadCodec, ProjectionCursor, ProjectionDescriptor, ProjectionFailure,
-    ProjectionRuntime, ProjectionScope, ProjectionStatus, QueryConsistency, QueryDefinition,
-    QueryHandle, QueryOperation, QueryResult, ReaderHandle, RecordDto, ReplayPage, ReplayRequest,
-    StaleReason, MAX_FACADE_BATCH_BYTES, MAX_FACADE_PAYLOAD_BYTES, MAX_REPLAY_PAGE_BYTES,
-    MAX_REPLAY_PAGE_EVENTS,
+    CommittedBatch, DiffDto, DiffRequestDto, DiffSideDto, DurabilityDto, Engine, EngineError,
+    EngineOptions, ErrorCategory, EventData, ExpectedRevisionDto, FeedFilter, FeedHandle, FeedPage,
+    FeedRequest, InputType, PartitionScheme, PartitionStatus, PayloadCodec, ProjectionCursor,
+    ProjectionDescriptor, ProjectionFailure, ProjectionRuntime, ProjectionScope, ProjectionStatus,
+    QueryConsistency, QueryDefinition, QueryHandle, QueryOperation, QueryResult, ReaderHandle,
+    RecordDto, ReplayPage, ReplayRequest, StaleReason, MAX_FACADE_BATCH_BYTES,
+    MAX_FACADE_PAYLOAD_BYTES, MAX_REPLAY_PAGE_BYTES, MAX_REPLAY_PAGE_EVENTS,
 };
 pub use format::{
     BatchId, BincodeCodec, BranchId, CodecId, DatabaseId, EventId, EventType, FormatLimits,
@@ -106,7 +109,7 @@ pub use projection::{NamespaceScoped, Projection};
 pub use view::{Change, IndexKey, IndexedView, View};
 
 pub use agent::AgentDb;
-pub use db::Salamander;
+pub use db::{DiffRequest, DiffSide, Salamander, TimelineDiff};
 pub use json::{Json, JsonDb};
 pub use migration::{migrate_legacy_branches, migrate_v1, BranchMigrationReport, MigrationReport};
 // Snapshot descriptors are surfaced only through the engine facade

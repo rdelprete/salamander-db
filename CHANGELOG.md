@@ -6,6 +6,62 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.3] — 2026-07-15
+
+### Added
+
+- **First-class diff** — the divergence of two timelines as an engine
+  operation ([docs/specs/first-class-diff.md](docs/specs/first-class-diff.md)):
+  `Salamander::diff` returns the common ancestor, the exact divergence
+  position, and three replay plans (shared prefix, each divergent suffix),
+  computed from the branch catalog alone — no record is read or compared,
+  and payload bytes are never consulted. Exposed through the facade
+  (`Engine::diff`, emitting ready-to-open `ReplayRequest`s) and the Python
+  binding (`db.diff`, returning a summary dict plus three pre-scoped
+  readers). The DIFF contract is defended by catalog unit tests, an
+  integration property test whose oracle is the brute-force
+  double-replay-and-zip, and facade/Python suites; `chat.py`'s `/diff` now
+  runs on the engine call, and `salamander/examples/08_diff.rs` shows the
+  Rust surface.
+- **`db.watch` in the Python binding** — the committed-batch feed as a
+  blocking iterator: `tail -f` for the log. Yields events (the same row
+  dicts as `replay`) only once durable, releases the GIL while waiting on
+  the feed's commit signal, and stays Ctrl+C-responsive via chunked waits.
+  `start=None` tails live from the durable head, `start=0` replays durable
+  history then follows, `branch=` scopes to one timeline, `namespace=`
+  filters per event, `timeout=` (seconds) ends the iteration when idle,
+  and `consumer_id=` + `watch.ack()` persist a resumable checkpoint.
+  Binding-only — the engine's feed (WP-08) already provided the
+  subscription primitive. Nine-test pytest suite in
+  `examples/py/test_watch.py`, including a cross-thread blocking wake.
+- **Replay rows now carry `branch_id` and `namespace`** (additive) — so
+  feed/watch consumers spanning branches and streams can tell rows apart
+  without decoding metadata.
+- **Typed, deterministic Python lifecycle** — database handles now support
+  `with salamander.open(...) as db`, matching watch handles and releasing the
+  single-writer lock deterministically. Wheels include a `py.typed` marker and
+  `salamander.pyi` API definitions for editor and static-checker discovery.
+
+### Changed
+
+- **Clearer adoption boundary and documentation path** — the README now leads
+  with durable execution history, distinguishes it from semantic memory, and
+  includes explicit fit/non-fit guidance plus the current forever-retention
+  limitation. New Python usage and upgrade guides document handle ownership,
+  synchronous use from async applications, backups, schema evolution, and
+  pre-1.0 compatibility expectations.
+
+### Fixed
+
+- **Inherited replay leaked grandparent records for forks created below
+  their parent's own fork position.** `replay_scopes` capped each ancestor
+  level only by the immediate child's fork position, so such a fork
+  (legal, if odd) saw grandparent records in the window between the two
+  fork points — contradicting `fork_branch`'s documented "inherits parent
+  history up to `at`". The visibility caps now cascade as a running
+  minimum from leaf to root. Found by the first-class-diff property test's
+  double-replay oracle; pinned by catalog unit tests.
+
 ## [0.1.2] — 2026-07-14
 
 ### Fixed
@@ -42,11 +98,24 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   engine maintains, queried without replaying the log. Twenty offline tests;
   see [docs/specs/dungeon-demo.md](docs/specs/dungeon-demo.md).
 
-## [0.1.0] — unreleased
+## [0.1.1] — 2026-07-13
 
-First public release. The engine ships with the complete post-v0.1
-architecture, built on a set of normative correctness contracts, from the
-stable on-disk format through instant recovery.
+Release automation only — no engine changes.
+
+### Added
+
+- **crates.io release workflow** — publishes the crate on version tags via
+  Trusted Publishing, alongside the PyPI wheel workflow shipped in 0.1.0.
+- **Python suite in CI** — the CI workflow builds the extension and runs
+  the Python tests in a virtual environment.
+
+## [0.1.0] — 2026-07-13
+
+First public release — `salamander-db` on crates.io and abi3 Python wheels
+on PyPI (Linux/macOS/Windows, built by maturin CI). The engine ships with
+the complete post-v0.1 architecture, built on a set of normative
+correctness contracts, from the stable on-disk format through instant
+recovery.
 
 ### Storage and format
 
@@ -147,4 +216,8 @@ retention/compaction, network replication transport, and the swizzled
 projection store — see [ROADMAP.md](ROADMAP.md) for what is planned versus
 permanently out of scope.
 
+[Unreleased]: https://github.com/rdelprete/salamander-db/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/rdelprete/salamander-db/releases/tag/v0.1.3
+[0.1.2]: https://github.com/rdelprete/salamander-db/releases/tag/v0.1.2
+[0.1.1]: https://github.com/rdelprete/salamander-db/releases/tag/v0.1.1
 [0.1.0]: https://github.com/rdelprete/salamander-db/releases/tag/v0.1.0

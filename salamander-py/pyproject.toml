@@ -19,6 +19,8 @@ classifiers = [
 
 [project.urls]
 Repository = "https://github.com/rdelprete/salamander-db"
+Documentation = "https://github.com/rdelprete/salamander-db#documentation"
+Changelog = "https://github.com/rdelprete/salamander-db/blob/main/CHANGELOG.md"
 
 [tool.maturin]
 # The Rust cdylib lib is named `salamander`, which is the Python import name;
@@ -26,3 +28,4 @@ Repository = "https://github.com/rdelprete/salamander-db"
 # split. abi3 gives one wheel across CPython 3.9+.
 module-name = "salamander"
 features = ["pyo3/extension-module"]
+include = ["salamander.pyi", "py.typed"]

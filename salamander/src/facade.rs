@@ -224,7 +224,7 @@ pub struct BranchDto {
     pub archived: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayRequest {
     pub branch_id: [u8; 16],
     pub stream: Option<String>,
@@ -276,6 +276,57 @@ pub struct ReplayPage {
     pub records: Vec<RecordDto>,
     pub continuation: u64,
     pub done: bool,
+}
+
+/// What to diff: two timelines by branch id, each optionally bounded by an
+/// exclusive until (`None` = head), with paging carried into the emitted
+/// [`ReplayRequest`]s. See `docs/specs/first-class-diff.md`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffRequestDto {
+    pub left_branch_id: [u8; 16],
+    pub right_branch_id: [u8; 16],
+    pub left_until: Option<u64>,
+    pub right_until: Option<u64>,
+    /// Optional stream-name filter, same shape as [`ReplayRequest::stream`].
+    pub stream: Option<String>,
+    pub page_events: u32,
+    pub page_bytes: usize,
+}
+
+impl DiffRequestDto {
+    /// A whole-timeline diff of two branches at head, default paging.
+    pub fn new(left_branch_id: [u8; 16], right_branch_id: [u8; 16]) -> Self {
+        Self {
+            left_branch_id,
+            right_branch_id,
+            left_until: None,
+            right_until: None,
+            stream: None,
+            page_events: 256,
+            page_bytes: 1024 * 1024,
+        }
+    }
+}
+
+/// One side of a [`DiffDto`]: the branch, its resolved until, and a
+/// ready-to-open [`ReplayRequest`] for its divergent suffix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffSideDto {
+    pub branch: BranchDto,
+    pub until: u64,
+    pub suffix: ReplayRequest,
+}
+
+/// The divergence of two timelines: a position plus three replay requests,
+/// each ready for [`Engine::open_reader`]. Computed from the branch
+/// catalog alone — no records are read or compared.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffDto {
+    pub common_ancestor: BranchDto,
+    pub divergence_position: u64,
+    pub shared: ReplayRequest,
+    pub left: DiffSideDto,
+    pub right: DiffSideDto,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -664,6 +715,10 @@ impl Engine {
         self.call(|reply| Command::Archive(id, reply))
     }
 
+    pub fn diff(&self, request: DiffRequestDto) -> Result<DiffDto, EngineError> {
+        self.call(|reply| Command::Diff(request, reply))
+    }
+
     pub fn open_reader(&self, request: ReplayRequest) -> Result<ReaderHandle, EngineError> {
         self.call(|reply| Command::OpenReader(request, reply))
     }
@@ -906,6 +961,10 @@ enum Command {
         mpsc::SyncSender<Result<Vec<BranchDto>, EngineError>>,
     ),
     Archive([u8; 16], mpsc::SyncSender<Result<BranchDto, EngineError>>),
+    Diff(
+        DiffRequestDto,
+        mpsc::SyncSender<Result<DiffDto, EngineError>>,
+    ),
     OpenReader(
         ReplayRequest,
         mpsc::SyncSender<Result<ReaderHandle, EngineError>>,
@@ -1293,6 +1352,9 @@ fn sequencer(
                     .map_err(Into::into);
                 let _ = reply.send(result);
             }
+            Command::Diff(request, reply) => {
+                let _ = reply.send(diff_dto(&db, request));
+            }
             Command::OpenReader(request, reply) => {
                 let mut request = request;
                 if request.until.is_none() {
@@ -1647,6 +1709,58 @@ fn append(
         })
         .map_err(EngineError::from)?;
     Ok(receipt_dto(receipt))
+}
+
+/// Resolves a diff against the typed engine and re-expresses the result as
+/// three ready-to-open [`ReplayRequest`]s carrying the request's stream
+/// filter and paging. Catalog arithmetic only — no record is read.
+fn diff_dto(db: &Salamander<EngineEvent>, request: DiffRequestDto) -> Result<DiffDto, EngineError> {
+    if request.page_events == 0 || request.page_events > MAX_REPLAY_PAGE_EVENTS {
+        return Err(resource(
+            "page events",
+            request.page_events as usize,
+            MAX_REPLAY_PAGE_EVENTS as usize,
+        ));
+    }
+    if request.page_bytes == 0 || request.page_bytes > MAX_REPLAY_PAGE_BYTES {
+        return Err(resource(
+            "page bytes",
+            request.page_bytes,
+            MAX_REPLAY_PAGE_BYTES,
+        ));
+    }
+    let diff = db
+        .diff(crate::DiffRequest {
+            left: BranchId::from_bytes(request.left_branch_id),
+            right: BranchId::from_bytes(request.right_branch_id),
+            left_until: request.left_until.map_or(ReplayEnd::Head, ReplayEnd::At),
+            right_until: request.right_until.map_or(ReplayEnd::Head, ReplayEnd::At),
+            streams: StreamSelector::All,
+        })
+        .map_err(EngineError::from)?;
+    let replay = |branch: BranchId, from: u64, until: u64| ReplayRequest {
+        branch_id: branch.into_bytes(),
+        stream: request.stream.clone(),
+        from,
+        until: Some(until),
+        page_events: request.page_events,
+        page_bytes: request.page_bytes,
+    };
+    Ok(DiffDto {
+        shared: replay(diff.common_ancestor.id, 0, diff.divergence),
+        common_ancestor: branch_dto(diff.common_ancestor),
+        divergence_position: diff.divergence,
+        left: DiffSideDto {
+            suffix: replay(diff.left.branch.id, diff.divergence, diff.left.until),
+            until: diff.left.until,
+            branch: branch_dto(diff.left.branch),
+        },
+        right: DiffSideDto {
+            suffix: replay(diff.right.branch.id, diff.divergence, diff.right.until),
+            until: diff.right.until,
+            branch: branch_dto(diff.right.branch),
+        },
+    })
 }
 
 fn validate_replay(

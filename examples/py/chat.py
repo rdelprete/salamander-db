@@ -34,6 +34,16 @@ class ChatError(Exception):
     """A user mistake (bad turn number, unknown branch) — printed, not fatal."""
 
 
+def _drain(reader):
+    """Every row from a paginated engine reader (e.g. a diff suffix)."""
+    rows = []
+    while True:
+        page = reader.next_page()
+        rows.extend(page["records"])
+        if page["done"]:
+            return rows
+
+
 # ── model backends ──────────────────────────────────────────────────────
 
 
@@ -205,16 +215,22 @@ class ChatSession:
         return MAIN if self.branch is None else self.branch
 
     def diff(self, a, b):
-        """Where two timelines agree and where they diverge.
+        """Where two timelines agree and where they diverge — one engine
+        call. The divergence point comes from the branch catalog (a fork is
+        durable ancestry), not from comparing transcripts; "shared" means
+        shared *history*, so turns that merely repeat the same text on both
+        branches after the fork still count as divergent. The double replay
+        this method used to do survives as the oracle in the engine's own
+        property tests (docs/specs/first-class-diff.md).
         Returns (shared_turn_count, a_suffix, b_suffix)."""
-        ta = self.turns(None if a == MAIN else self._known(a))
-        tb = self.turns(None if b == MAIN else self._known(b))
-        shared = 0
-        for x, y in zip(ta, tb):
-            if x != y:
-                break
-            shared += 1
-        return shared, ta[shared:], tb[shared:]
+        for name in (a, b):
+            if name != MAIN:
+                self._known(name)
+        d = self.db.diff(a, b, namespace=self.ns)
+        bodies = lambda reader: [r["body"] for r in _drain(reader)]
+        return (len(_drain(d["shared"])),
+                bodies(d["left"]["suffix"]),
+                bodies(d["right"]["suffix"]))
 
     def _known(self, name):
         if not any(b["branch"] == name for b in self.branches()):

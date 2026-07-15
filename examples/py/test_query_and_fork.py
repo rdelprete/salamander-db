@@ -128,6 +128,61 @@ def test_facade_receipt_paging_and_close(tmp_path):
         db.head()
 
 
+def drain(reader):
+    rows = []
+    while True:
+        page = reader.next_page()
+        rows.extend(page["records"])
+        if page["done"]:
+            return rows
+
+
+def test_diff_reports_divergence_and_prescoped_readers(tmp_path):
+    db = salamander.open(str(tmp_path / "db"))
+    db.append("chat", {"text": "hi"})
+    db.append("chat", {"text": "how many days?"})
+    at = db.head()
+    db.append("chat", {"text": "5 days"})
+    child = db.fork("chat", at)
+    db.append_branch(child, "chat", {"text": "3 days"})
+    db.commit()
+
+    d = db.diff("main", child, namespace="chat")
+    assert d["common_ancestor"] == "main"
+    assert d["divergence_offset"] == at
+    assert d["left"]["branch"] == "main"
+    assert d["right"]["branch"] == child
+    assert [r["body"]["text"] for r in drain(d["shared"])] == [
+        "hi",
+        "how many days?",
+    ]
+    assert [r["body"]["text"] for r in drain(d["left"]["suffix"])] == ["5 days"]
+    assert [r["body"]["text"] for r in drain(d["right"]["suffix"])] == ["3 days"]
+
+
+def test_diff_same_branch_untils_is_the_rewind_diff(tmp_path):
+    db = salamander.open(str(tmp_path / "db"))
+    for text in ["a", "b", "c"]:
+        db.append("chat", {"text": text})
+    db.commit()
+
+    d = db.diff("main", "main", namespace="chat", left_until=1, right_until=3)
+    assert d["divergence_offset"] == 1
+    assert drain(d["left"]["suffix"]) == []
+    assert [r["body"]["text"] for r in drain(d["right"]["suffix"])] == ["b", "c"]
+
+
+def test_diff_maps_the_stable_exception_categories(tmp_path):
+    db = salamander.open(str(tmp_path / "db"))
+    db.append("chat", {"text": "a"})
+    db.commit()
+
+    with pytest.raises(salamander.NotFoundError):
+        db.diff("main", "no-such-branch")
+    with pytest.raises(salamander.InvalidArgumentError):
+        db.diff("main", "main", left_until=db.head() + 1)
+
+
 def test_python_threads_share_the_safe_sequencer(tmp_path):
     db = salamander.open(str(tmp_path / "db"))
 

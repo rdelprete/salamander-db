@@ -221,16 +221,49 @@ impl BranchCatalog {
 
     pub(crate) fn replay_scopes(&self, id: BranchId, upto: u64) -> Result<Vec<(BranchId, u64)>> {
         let ancestry = self.ancestry(id)?;
-        let mut scopes = Vec::with_capacity(ancestry.len());
-        for (index, branch) in ancestry.iter().enumerate() {
-            let upper = ancestry
-                .get(index + 1)
-                .and_then(|child| child.fork_position)
-                .unwrap_or(upto)
-                .min(upto);
-            scopes.push((branch.id, upper));
-        }
+        // A fork inherits history strictly up to its position — including
+        // what its parent had itself inherited — so each level's upper
+        // bound is the *running minimum* of every downstream fork position
+        // on the path, not just the immediate child's. The two differ only
+        // when a fork sits below its parent's own fork point (legal, if
+        // odd); capping by the immediate child alone leaked grandparent
+        // records into that window.
+        let mut upper = upto;
+        let mut scopes: Vec<(BranchId, u64)> = ancestry
+            .iter()
+            .enumerate()
+            .rev()
+            .map(|(index, branch)| {
+                if let Some(child) = ancestry.get(index + 1) {
+                    upper = upper.min(child.fork_position.unwrap_or(upto));
+                }
+                (branch.id, upper)
+            })
+            .collect();
+        scopes.reverse();
         Ok(scopes)
+    }
+
+    /// The common ancestor and exclusive divergence position of two
+    /// timelines, per the DIFF contract
+    /// (`docs/specs/first-class-diff.md`). Pure catalog arithmetic over
+    /// engine-owned ancestry positions — payload bytes are never consulted
+    /// (DIFF-6), and no log I/O happens here (untils arrive pre-resolved).
+    pub(crate) fn divergence(
+        &self,
+        left: BranchId,
+        left_until: u64,
+        right: BranchId,
+        right_until: u64,
+    ) -> Result<(BranchInfo, u64)> {
+        let left_path = self.ancestry(left)?;
+        let right_path = self.ancestry(right)?;
+        Ok(divergence_of(
+            &left_path,
+            left_until,
+            &right_path,
+            right_until,
+        ))
     }
 
     pub(crate) fn common_ancestor(&self, left: BranchId, right: BranchId) -> Result<BranchInfo> {
@@ -244,5 +277,158 @@ impl BranchCatalog {
             .ok_or_else(|| {
                 SalamanderError::InvalidBranchAncestry("branches have no common root".into())
             })
+    }
+}
+
+/// Divergence over two resolved root-first ancestry paths: the deepest
+/// shared branch node, and the smallest of — each side's exclusive until
+/// and *every* non-shared node's fork position on either path. Every
+/// non-shared node caps the divergence (its local records sit at
+/// positions at or above its fork and are visible to one side only), and
+/// fork positions are not monotone along a path — a fork below its
+/// parent's own fork point is legal — so the minimum runs over the whole
+/// divergent tail, mirroring the cascaded caps in `replay_scopes`. Every
+/// ancestry begins at the default branch, so the shared prefix is never
+/// empty.
+fn divergence_of(
+    left_path: &[BranchInfo],
+    left_until: u64,
+    right_path: &[BranchInfo],
+    right_until: u64,
+) -> (BranchInfo, u64) {
+    let shared = left_path
+        .iter()
+        .zip(right_path)
+        .take_while(|(a, b)| a.id == b.id)
+        .count();
+    debug_assert!(shared >= 1, "ancestries always share the default branch");
+    let ancestor = left_path[shared - 1].clone();
+    let side_min = |path: &[BranchInfo], until: u64| {
+        path[shared..]
+            .iter()
+            .filter_map(|branch| branch.fork_position)
+            .fold(until, u64::min)
+    };
+    let divergence = side_min(left_path, left_until).min(side_min(right_path, right_until));
+    (ancestor, divergence)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node(id: u8, parent: Option<u8>, fork_position: Option<u64>) -> BranchInfo {
+        BranchInfo {
+            id: BranchId::from_bytes([id; 16]),
+            name: BranchName::new(format!("branch-{id}")).unwrap(),
+            parent: parent.map(|p| BranchId::from_bytes([p; 16])),
+            fork_position,
+            created_at_unix_nanos: 0,
+            metadata: Metadata::new(),
+            status: BranchStatus::Active,
+        }
+    }
+
+    fn root() -> BranchInfo {
+        BranchInfo {
+            id: BranchId::ZERO,
+            name: BranchName::new(DEFAULT_BRANCH_NAME).unwrap(),
+            parent: None,
+            fork_position: None,
+            created_at_unix_nanos: 0,
+            metadata: Metadata::new(),
+            status: BranchStatus::Active,
+        }
+    }
+
+    #[test]
+    fn ancestor_vs_descendant_diverges_at_the_fork() {
+        let main = vec![root()];
+        let fork = vec![root(), node(1, Some(0), Some(8))];
+        let (ancestor, d) = divergence_of(&main, 12, &fork, 17);
+        assert_eq!(ancestor.id, BranchId::ZERO);
+        assert_eq!(d, 8);
+    }
+
+    #[test]
+    fn siblings_diverge_at_the_earlier_fork() {
+        let left = vec![root(), node(1, Some(0), Some(5))];
+        let right = vec![root(), node(2, Some(0), Some(9))];
+        let (ancestor, d) = divergence_of(&left, 20, &right, 20);
+        assert_eq!(ancestor.id, BranchId::ZERO);
+        assert_eq!(d, 5);
+    }
+
+    #[test]
+    fn same_branch_diverges_at_the_smaller_until() {
+        let path = vec![root(), node(1, Some(0), Some(3))];
+        let (ancestor, d) = divergence_of(&path, 4, &path, 9);
+        assert_eq!(ancestor.id, path[1].id);
+        assert_eq!(d, 4);
+        let (_, d) = divergence_of(&path, 9, &path, 9);
+        assert_eq!(d, 9);
+    }
+
+    #[test]
+    fn an_until_below_the_fork_caps_the_divergence() {
+        let main = vec![root()];
+        let fork = vec![root(), node(1, Some(0), Some(8))];
+        let (_, d) = divergence_of(&main, 3, &fork, 17);
+        assert_eq!(d, 3);
+    }
+
+    #[test]
+    fn grandchildren_share_the_deepest_common_node() {
+        let child = node(1, Some(0), Some(4));
+        let left = vec![root(), child.clone(), node(2, Some(1), Some(7))];
+        let right = vec![root(), child.clone(), node(3, Some(1), Some(10))];
+        let (ancestor, d) = divergence_of(&left, 20, &right, 20);
+        assert_eq!(ancestor.id, child.id);
+        assert_eq!(d, 7);
+    }
+
+    #[test]
+    fn fork_at_zero_diverges_at_zero() {
+        let main = vec![root()];
+        let fork = vec![root(), node(1, Some(0), Some(0))];
+        let (_, d) = divergence_of(&main, 6, &fork, 6);
+        assert_eq!(d, 0);
+    }
+
+    #[test]
+    fn a_fork_below_its_parents_fork_caps_the_divergence() {
+        // b = fork(a, 0) where a = fork(main, 1): b inherits *nothing*
+        // (its position caps the whole inherited prefix), so diffing b
+        // against a — or against anything — diverges at 0, not at a's
+        // fork. Found by the diff property test's double-replay oracle.
+        let a = node(1, Some(0), Some(1));
+        let a_path = vec![root(), a.clone()];
+        let b_path = vec![root(), a, node(2, Some(1), Some(0))];
+        let (ancestor, d) = divergence_of(&b_path, 2, &a_path, 2);
+        assert_eq!(ancestor.id, b_path[1].id);
+        assert_eq!(d, 0);
+    }
+
+    #[test]
+    fn replay_scopes_cascade_downstream_fork_caps() {
+        let mut catalog = BranchCatalog {
+            by_id: HashMap::from([(BranchId::ZERO, root())]),
+            by_name: HashMap::from([(DEFAULT_BRANCH_NAME.to_string(), BranchId::ZERO)]),
+        };
+        catalog.insert(node(1, Some(0), Some(3))).unwrap();
+        catalog.insert(node(2, Some(1), Some(1))).unwrap();
+        // Grandchild forked at 1, below its parent's fork at 3: every
+        // inherited level is capped at 1 — the parent's cap must not leak
+        // root records from [1, 3) into the grandchild's timeline.
+        assert_eq!(
+            catalog
+                .replay_scopes(BranchId::from_bytes([2; 16]), 10)
+                .unwrap(),
+            vec![
+                (BranchId::ZERO, 1),
+                (BranchId::from_bytes([1; 16]), 1),
+                (BranchId::from_bytes([2; 16]), 10),
+            ]
+        );
     }
 }

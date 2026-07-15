@@ -35,6 +35,20 @@ def test_survives_reopen(tmp_path):
     assert [r["body"]["n"] for r in reopened.replay("s")] == [1, 2]
 
 
+def test_database_context_manager_closes_handle(tmp_path):
+    path = str(tmp_path / "context-manager")
+    with salamander.open(path) as db:
+        db.append("session", {"kind": "started"})
+        db.commit()
+
+    with pytest.raises(RuntimeError):
+        db.head()
+
+    # Closing the first handle releases the single-writer lock.
+    with salamander.open(path) as reopened:
+        assert reopened.replay("session")[0]["body"] == {"kind": "started"}
+
+
 def test_group_commit_policy(tmp_path):
     db = salamander.open(str(tmp_path / "db"), commit_every_count=2)
     db.append("s", {"n": 1})

@@ -3,8 +3,8 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 
 use salamander::{
-    DurabilityDto, Engine, EngineAppendBatch, EngineOptions, ErrorCategory, EventData,
-    ExpectedRevisionDto, PayloadCodec, QueryDefinition, QueryOperation, ReplayRequest,
+    DiffRequestDto, DurabilityDto, Engine, EngineAppendBatch, EngineOptions, ErrorCategory,
+    EventData, ExpectedRevisionDto, PayloadCodec, QueryDefinition, QueryOperation, ReplayRequest,
     MAX_FACADE_PAYLOAD_BYTES,
 };
 
@@ -295,5 +295,72 @@ fn paged_replay_terminates_when_filtered_records_trail_the_scan() {
             ..ReplayRequest::default()
         }),
         vec![0, 2]
+    );
+}
+
+/// First-class diff over the facade: the emitted `ReplayRequest`s must
+/// drain to `done` from both sides of a diverged pair (page size 1 to
+/// exercise the branch-scope-filtered-tail pagination path), and the
+/// answer must survive `delete_all_derived_state` unchanged (DIFF-5).
+#[test]
+fn diff_emits_replay_requests_that_drain_both_suffixes() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = Engine::open(EngineOptions::new(dir.path())).unwrap();
+    engine
+        .append(batch("chat", vec![1], PayloadCodec::Bytes))
+        .unwrap();
+    engine
+        .append(batch("chat", vec![2], PayloadCodec::Bytes))
+        .unwrap();
+    engine.commit().unwrap();
+    let branch = engine
+        .fork([0; 16], 2, "alternative".into(), BTreeMap::new())
+        .unwrap();
+    let mut child = batch("chat", vec![3], PayloadCodec::Bytes);
+    child.branch_id = branch.id;
+    engine.append(child).unwrap();
+    engine
+        .append(batch("chat", vec![4], PayloadCodec::Bytes))
+        .unwrap();
+    engine.commit().unwrap();
+
+    let mut request = DiffRequestDto::new([0; 16], branch.id);
+    request.stream = Some("chat".into());
+    request.page_events = 1;
+    let diff = engine.diff(request.clone()).unwrap();
+    assert_eq!(diff.common_ancestor.id, [0; 16]);
+    assert_eq!(diff.divergence_position, 2);
+
+    let drain = |request: ReplayRequest| {
+        let reader = engine.open_reader(request).unwrap();
+        let mut positions = Vec::new();
+        for pages in 0.. {
+            assert!(pages < 8, "paging never reported done");
+            let page = engine.next_page(reader).unwrap();
+            positions.extend(page.records.iter().map(|record| record.position));
+            if page.done {
+                break;
+            }
+        }
+        positions
+    };
+    assert_eq!(drain(diff.shared.clone()), vec![0, 1]);
+    // Each suffix ends in the other side's records at the log tail — the
+    // scope filter must still let the page report done.
+    assert_eq!(drain(diff.left.suffix.clone()), vec![3]);
+    assert_eq!(drain(diff.right.suffix.clone()), vec![2]);
+
+    // DIFF-5: a diff depends on the catalog and the log alone; deleting
+    // all derived state may change performance, never this answer.
+    engine.delete_all_derived_state().unwrap();
+    assert_eq!(engine.diff(request).unwrap(), diff);
+
+    // Unknown branches map to the stable NotFound category.
+    assert_eq!(
+        engine
+            .diff(DiffRequestDto::new([0; 16], [9; 16]))
+            .unwrap_err()
+            .category,
+        ErrorCategory::NotFound
     );
 }

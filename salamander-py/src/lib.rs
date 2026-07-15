@@ -1,17 +1,27 @@
 //! Thin PyO3 translation layer over the thread-safe WP-05 engine facade.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
+use std::time::{Duration, Instant};
 
 use pyo3::create_exception;
 use pyo3::exceptions::{PyIOError, PyKeyError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyBytes, PyDict, PyList};
 use salamander_db::{
-    BranchDto, DurabilityDto, Engine, EngineAppendBatch, EngineError, EngineOptions, ErrorCategory,
-    EventData, ExpectedRevisionDto, QueryDefinition, QueryHandle, QueryOperation, RecordDto,
-    ReplayRequest,
+    BranchDto, DiffRequestDto, DiffSideDto, DurabilityDto, Engine, EngineAppendBatch, EngineError,
+    EngineOptions, ErrorCategory, EventData, ExpectedRevisionDto, FeedFilter, FeedRequest,
+    QueryDefinition, QueryHandle, QueryOperation, RecordDto, ReplayRequest,
 };
 use serde_json::Value;
+
+/// Metadata key carrying the user-facing stream (namespace) name on every
+/// appended record — the same key the facade's paged replay filters on.
+const STREAM_NAME_KEY: &str = "salamander.stream_name";
+
+/// Upper bound on one blocking wait inside `Watch.__next__` before the GIL
+/// is retaken to deliver pending signals — keeps Ctrl+C responsive while a
+/// watch blocks indefinitely.
+const WATCH_WAIT_CHUNK_MILLIS: u64 = 200;
 
 create_exception!(salamander, SalamanderError, PyRuntimeError);
 create_exception!(salamander, InvalidArgumentError, PyValueError);
@@ -155,6 +165,22 @@ impl Salamander {
         py.allow_threads(|| self.engine.close()).map_err(to_pyerr)
     }
 
+    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    #[pyo3(signature = (_exc_type=None, _exc_value=None, _traceback=None))]
+    fn __exit__(
+        &self,
+        py: Python<'_>,
+        _exc_type: Option<&Bound<'_, PyAny>>,
+        _exc_value: Option<&Bound<'_, PyAny>>,
+        _traceback: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<bool> {
+        self.close(py)?;
+        Ok(false)
+    }
+
     #[pyo3(signature = (namespace, start=0, end=None))]
     fn replay(
         &self,
@@ -267,6 +293,125 @@ impl Salamander {
         })
         .map(|branch| branch.name)
         .map_err(to_pyerr)
+    }
+
+    /// A blocking iterator over events as they become durable — `tail -f`
+    /// for the log, over the engine's committed-batch feed. `start=None`
+    /// tails live from the durable head (or resumes a `consumer_id`'s
+    /// acknowledged checkpoint); `start=0` replays all durable history
+    /// first, then follows. `timeout` (seconds) ends the iteration after
+    /// that long without a matching event; `None` blocks until closed.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (namespace=None, branch=None, start=None, consumer_id=None, timeout=None, page_batches=128, page_bytes=1048576))]
+    fn watch(
+        &self,
+        py: Python<'_>,
+        namespace: Option<String>,
+        branch: Option<&str>,
+        start: Option<u64>,
+        consumer_id: Option<String>,
+        timeout: Option<f64>,
+        page_batches: u32,
+        page_bytes: usize,
+    ) -> PyResult<Watch> {
+        let branches = match branch {
+            None => Vec::new(),
+            Some(name) => vec![
+                py.allow_threads(|| self.engine.branch_named(name.to_string()))
+                    .map_err(to_pyerr)?
+                    .id,
+            ],
+        };
+        let from = match (start, &consumer_id) {
+            (Some(position), _) => Some(position),
+            (None, Some(_)) => None, // resume from the acknowledged checkpoint
+            (None, None) => Some(
+                py.allow_threads(|| self.engine.durable_head())
+                    .map_err(to_pyerr)?,
+            ),
+        };
+        let handle = py
+            .allow_threads(|| {
+                self.engine.open_feed(FeedRequest {
+                    from,
+                    consumer_id,
+                    filter: FeedFilter {
+                        branches,
+                        streams: Vec::new(),
+                        event_types: Vec::new(),
+                    },
+                    page_batches,
+                    page_bytes,
+                })
+            })
+            .map_err(to_pyerr)?;
+        Ok(Watch {
+            engine: self.engine.clone(),
+            handle: Some(handle),
+            namespace,
+            timeout_millis: timeout.map(|seconds| (seconds * 1000.0).max(0.0) as u64),
+            buffer: VecDeque::new(),
+        })
+    }
+
+    /// The divergence of two timelines (branch names; "main" is the
+    /// default timeline): a summary dict plus three pre-scoped `Reader`s —
+    /// nothing is materialized until a reader is drained. See
+    /// docs/specs/first-class-diff.md.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (left, right, namespace=None, left_until=None, right_until=None, page_events=256, page_bytes=1048576))]
+    fn diff(
+        &self,
+        py: Python<'_>,
+        left: &str,
+        right: &str,
+        namespace: Option<&str>,
+        left_until: Option<u64>,
+        right_until: Option<u64>,
+        page_events: u32,
+        page_bytes: usize,
+    ) -> PyResult<PyObject> {
+        let diff = py
+            .allow_threads(|| -> Result<_, EngineError> {
+                let left = self.engine.branch_named(left.to_string())?.id;
+                let right = self.engine.branch_named(right.to_string())?.id;
+                self.engine.diff(DiffRequestDto {
+                    left_branch_id: left,
+                    right_branch_id: right,
+                    left_until,
+                    right_until,
+                    stream: namespace.map(str::to_string),
+                    page_events,
+                    page_bytes,
+                })
+            })
+            .map_err(to_pyerr)?;
+        let reader = |request: ReplayRequest| -> PyResult<Py<Reader>> {
+            let handle = py
+                .allow_threads(|| self.engine.open_reader(request))
+                .map_err(to_pyerr)?;
+            Py::new(
+                py,
+                Reader {
+                    engine: self.engine.clone(),
+                    handle: Some(handle),
+                },
+            )
+        };
+        let side = |side: &DiffSideDto| -> PyResult<PyObject> {
+            let out = PyDict::new(py);
+            out.set_item("branch", &side.branch.name)?;
+            out.set_item("until", side.until)?;
+            out.set_item("suffix", reader(side.suffix.clone())?)?;
+            Ok(out.into_any().unbind())
+        };
+        let out = PyDict::new(py);
+        out.set_item("common_ancestor", &diff.common_ancestor.name)?;
+        out.set_item("divergence_offset", diff.divergence_position)?;
+        out.set_item("shared", reader(diff.shared.clone())?)?;
+        out.set_item("left", side(&diff.left)?)?;
+        out.set_item("right", side(&diff.right)?)?;
+        Ok(out.into_any().unbind())
     }
 
     fn history(&self, py: Python<'_>, namespace: &str) -> PyResult<Py<PyList>> {
@@ -383,6 +528,120 @@ struct View {
 struct Reader {
     engine: Engine,
     handle: Option<salamander_db::ReaderHandle>,
+}
+
+/// A blocking iterator over events as they become durable — the
+/// committed-batch feed worn as `tail -f`. Yields the same row dicts as
+/// `replay`, releases the GIL while waiting, and stays responsive to
+/// Ctrl+C by waking every `WATCH_WAIT_CHUNK_MILLIS` to deliver signals.
+#[pyclass]
+struct Watch {
+    engine: Engine,
+    handle: Option<salamander_db::FeedHandle>,
+    /// Row-level stream-name filter (batch feeds keep original batch
+    /// boundaries, so namespace selection happens per event, exactly like
+    /// the facade's paged replay).
+    namespace: Option<String>,
+    /// `None` blocks forever; otherwise `__next__` ends the iteration
+    /// (StopIteration) when no matching event arrives within the window.
+    timeout_millis: Option<u64>,
+    buffer: VecDeque<RecordDto>,
+}
+
+#[pymethods]
+impl Watch {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<PyObject>> {
+        let deadline = self
+            .timeout_millis
+            .map(|millis| Instant::now() + Duration::from_millis(millis));
+        loop {
+            if let Some(row) = self.buffer.pop_front() {
+                return Ok(Some(row_to_py(py, &row)?));
+            }
+            let handle = self
+                .handle
+                .ok_or_else(|| PyRuntimeError::new_err("watch is closed"))?;
+            let wait = match deadline {
+                None => WATCH_WAIT_CHUNK_MILLIS,
+                Some(deadline) => {
+                    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                        return Ok(None); // idle past the timeout — StopIteration
+                    };
+                    (remaining.as_millis() as u64).min(WATCH_WAIT_CHUNK_MILLIS)
+                }
+            };
+            let engine = self.engine.clone();
+            let page = py
+                .allow_threads(|| engine.next_feed_page(handle, Some(wait)))
+                .map_err(to_pyerr)?;
+            for batch in page.batches {
+                for event in batch.events {
+                    let matches = match &self.namespace {
+                        None => true,
+                        Some(wanted) => record_namespace(&event) == Some(wanted.as_str()),
+                    };
+                    if matches {
+                        self.buffer.push_back(event);
+                    }
+                }
+            }
+            py.check_signals()?;
+            if self.buffer.is_empty() {
+                if let Some(deadline) = deadline {
+                    if Instant::now() >= deadline {
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Persists the consumer checkpoint at the current feed position, so a
+    /// later `db.watch(consumer_id=...)` resumes exactly here. Meaningful
+    /// only when the watch was opened with a `consumer_id`.
+    fn ack(&self, py: Python<'_>) -> PyResult<u64> {
+        let handle = self
+            .handle
+            .ok_or_else(|| PyRuntimeError::new_err("watch is closed"))?;
+        py.allow_threads(|| self.engine.acknowledge_feed(handle))
+            .map_err(to_pyerr)
+    }
+
+    fn close(&mut self, py: Python<'_>) -> PyResult<()> {
+        if let Some(handle) = self.handle.take() {
+            py.allow_threads(|| self.engine.close_feed(handle))
+                .map_err(to_pyerr)?;
+        }
+        Ok(())
+    }
+
+    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    #[pyo3(signature = (_exc_type=None, _exc_value=None, _traceback=None))]
+    fn __exit__(
+        &mut self,
+        py: Python<'_>,
+        _exc_type: Option<&Bound<'_, PyAny>>,
+        _exc_value: Option<&Bound<'_, PyAny>>,
+        _traceback: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<bool> {
+        self.close(py)?;
+        Ok(false)
+    }
+}
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            let _ = self.engine.close_feed(handle);
+        }
+    }
 }
 
 #[pymethods]
@@ -639,32 +898,45 @@ fn collect(
     Ok(records)
 }
 
+fn row_to_py(py: Python<'_>, row: &RecordDto) -> PyResult<PyObject> {
+    let dict = PyDict::new(py);
+    dict.set_item("offset", row.position)?;
+    dict.set_item("timestamp_ms", row.timestamp_unix_nanos / 1_000_000)?;
+    dict.set_item("event_id", hex_id(row.event_id))?;
+    dict.set_item("batch_id", hex_id(row.batch_id))?;
+    dict.set_item("batch_index", row.batch_index)?;
+    dict.set_item("branch_id", hex_id(row.branch_id))?;
+    dict.set_item("namespace", record_namespace(row))?;
+    dict.set_item("stream_revision", row.stream_revision)?;
+    dict.set_item("event_type", &row.event_type)?;
+    dict.set_item("schema_version", row.schema_version)?;
+    dict.set_item(
+        "codec",
+        match row.codec {
+            salamander_db::PayloadCodec::Bytes => "bytes",
+            salamander_db::PayloadCodec::Json => "json",
+        },
+    )?;
+    let metadata = PyDict::new(py);
+    for (key, value) in &row.metadata {
+        metadata.set_item(key, PyBytes::new(py, value))?;
+    }
+    dict.set_item("metadata", metadata)?;
+    dict.set_item("body", bytes_to_py(py, &row.payload)?)?;
+    Ok(dict.into_any().unbind())
+}
+
+/// The user-facing stream (namespace) name stamped on a record, if any.
+fn record_namespace(row: &RecordDto) -> Option<&str> {
+    row.metadata
+        .get(STREAM_NAME_KEY)
+        .and_then(|value| std::str::from_utf8(value).ok())
+}
+
 fn rows_to_pylist(py: Python<'_>, rows: &[RecordDto]) -> PyResult<Py<PyList>> {
     let out = PyList::empty(py);
     for row in rows {
-        let dict = PyDict::new(py);
-        dict.set_item("offset", row.position)?;
-        dict.set_item("timestamp_ms", row.timestamp_unix_nanos / 1_000_000)?;
-        dict.set_item("event_id", hex_id(row.event_id))?;
-        dict.set_item("batch_id", hex_id(row.batch_id))?;
-        dict.set_item("batch_index", row.batch_index)?;
-        dict.set_item("stream_revision", row.stream_revision)?;
-        dict.set_item("event_type", &row.event_type)?;
-        dict.set_item("schema_version", row.schema_version)?;
-        dict.set_item(
-            "codec",
-            match row.codec {
-                salamander_db::PayloadCodec::Bytes => "bytes",
-                salamander_db::PayloadCodec::Json => "json",
-            },
-        )?;
-        let metadata = PyDict::new(py);
-        for (key, value) in &row.metadata {
-            metadata.set_item(key, PyBytes::new(py, value))?;
-        }
-        dict.set_item("metadata", metadata)?;
-        dict.set_item("body", bytes_to_py(py, &row.payload)?)?;
-        out.append(dict)?;
+        out.append(row_to_py(py, row)?)?;
     }
     Ok(out.unbind())
 }
@@ -868,6 +1140,7 @@ fn salamander(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Salamander>()?;
     m.add_class::<View>()?;
     m.add_class::<Reader>()?;
+    m.add_class::<Watch>()?;
     m.add_function(wrap_pyfunction!(open, m)?)?;
     m.add("SalamanderError", m.py().get_type::<SalamanderError>())?;
     m.add(
