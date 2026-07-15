@@ -6,6 +6,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-07-14
+
 ### Fixed
 
 - **Paged replay livelock** — `next_page` never reported `done` when the
@@ -37,7 +39,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `view_at`, dying forks a new future over the shared past, and a
   pull-the-plug button (`os._exit` mid-write) demonstrates crash-proof
   recovery. The bestiary panel is a registered view — a secondary index the
-  engine maintains, queried without replaying the log. Sixteen offline tests;
+  engine maintains, queried without replaying the log. Twenty offline tests;
   see [docs/specs/dungeon-demo.md](docs/specs/dungeon-demo.md).
 
 ## [0.1.0] — unreleased
