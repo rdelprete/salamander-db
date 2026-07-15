@@ -192,10 +192,25 @@ python examples/py/unkillable_agent.py   # an agent hard-killed twice mid-task;
 every move is an event, the timeline scrubber is `view_at(n)`, and when you
 die you drag back and *fork* a new future over the shared past. A red button
 pulls the plug — `os._exit` mid-write — and relaunching resumes exactly,
-because the log is the only durable structure. The chat demo talks to the
-Claude API when `ANTHROPIC_API_KEY` is set (and `anthropic` is installed),
-falling back to a deterministic offline mock; its directory persists,
-branches and all, across runs.
+because the log is the only durable structure.
+
+The 20-second tour — fight, rewind, fork, diverge, pull the plug, reload
+intact:
+
+<!-- Rendered as an inline player on GitHub; falls back to a clickable
+     poster elsewhere. Regenerate with examples/py/record_demo.py. -->
+<video src="https://github.com/rdelprete/salamander-db/raw/main/docs/assets/dungeon-demo.mp4" controls muted width="720" poster="docs/assets/dungeon-demo-poster.png">
+  <a href="docs/assets/dungeon-demo.mp4"><img src="docs/assets/dungeon-demo-poster.png" alt="The Undying Dungeon — 20-second tour" width="720"></a>
+</video>
+
+<sub>Nothing above is a save file: the board is a fold over the event log,
+the scrubber replays it, forking branches the timeline, and killing the
+process mid-write loses nothing — the same guarantees the engine gives any
+application.</sub>
+
+The chat demo talks to the Claude API when `ANTHROPIC_API_KEY` is set (and
+`anthropic` is installed), falling back to a deterministic offline mock; its
+directory persists, branches and all, across runs.
 
 ## Performance
 

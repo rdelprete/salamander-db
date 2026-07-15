@@ -212,5 +212,13 @@ CI: add `test_dungeon.py` to the workflow's explicit pytest list.
 - Verified end-to-end in a real browser: movement, the time-travel
   scrubber (turns 0/1/2 render distinct rewound worlds), fork-while-scrubbed
   (main untouched, both tabs), the ghost overlay, and a `POST /crash` →
-  relaunch → run-intact cycle. Sixteen offline tests
+  relaunch → run-intact cycle. Twenty offline tests
   (`test_dungeon.py`) cover the same ground and are wired into CI.
+- **README video is generated, not hand-recorded.** `examples/py/record_demo.py`
+  starts its own server, drives the money-loop with Playwright (fight →
+  rewind → fork → diverge → pull-the-plug → reload-intact), records it in
+  real time, and transcodes to `docs/assets/dungeon-demo.mp4` (~0.5 MiB,
+  H.264, 1000×720, ~21 s). Deterministic (fixed seed + fixed script), so the
+  asset is reproducible — re-run when the UI changes. Playwright and
+  `imageio-ffmpeg` are dev-only tooling for this script, not runtime or test
+  dependencies of the demo.
