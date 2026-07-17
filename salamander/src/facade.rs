@@ -21,7 +21,8 @@ use crate::{
     AppendReceipt, AppendRequest, BatchId, BranchId, BranchInfo, BranchName, BranchStatus, CodecId,
     CommitPolicy, Durability, EventId, EventType, ExpectedRevision, IdempotencyKey, Metadata,
     NewEvent, OwnedStoredRecord, ReceiptDurability, RecordEnvelopeV2, RecordReader, ReplayEnd,
-    ReplayPlan, Salamander, SalamanderError, StreamId, StreamName, StreamRevision, StreamSelector,
+    ReplayPlan, RetentionPlan, RetentionPolicy, RetentionPolicyPreview, Salamander,
+    SalamanderError, StreamId, StreamName, StreamRevision, StreamSelector,
 };
 
 pub const MAX_FACADE_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
@@ -45,10 +46,52 @@ pub enum ErrorCategory {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeedBootstrapDescriptor {
+    pub database_id: [u8; 16],
+    pub generation: u64,
+    pub floor: u64,
+    pub consumer_id: String,
+    pub checkpoint_id: [u8; 16],
+    pub scope: crate::RetentionFeedScope,
+    pub byte_length: u64,
+    pub checksum: u32,
+    pub resume_from: u64,
+    pub codec: String,
+    pub codec_version: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetentionConsumerStatus {
+    pub consumer_id: String,
+    pub position: u64,
+    pub behind_effective_floor: bool,
+    pub bootstrap_available: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetentionStatus {
+    pub database_id: [u8; 16],
+    pub generation: u64,
+    pub floor: u64,
+    pub durable_head: u64,
+    pub requested_floor: u64,
+    pub effective_floor: u64,
+    pub anchor_ready: bool,
+    pub reclaimable_segments: Vec<crate::RetentionSegment>,
+    pub reclaimable_bytes: u64,
+    pub blockers: Vec<crate::RetentionBlocker>,
+    pub open_readers: usize,
+    pub open_feeds: usize,
+    pub consumers: Vec<RetentionConsumerStatus>,
+    pub cleanup: crate::RetentionCleanupStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineError {
     pub category: ErrorCategory,
     pub code: &'static str,
     pub message: String,
+    pub feed_bootstrap: Option<Box<FeedBootstrapDescriptor>>,
 }
 
 impl EngineError {
@@ -57,6 +100,7 @@ impl EngineError {
             category: ErrorCategory::Cancelled,
             code: "engine_closed",
             message: "engine handle is closed".into(),
+            feed_bootstrap: None,
         }
     }
 
@@ -65,6 +109,7 @@ impl EngineError {
             category: ErrorCategory::Internal,
             code: "internal",
             message: message.into(),
+            feed_bootstrap: None,
         }
     }
 }
@@ -105,6 +150,9 @@ impl From<SalamanderError> for EngineError {
             SalamanderError::Io(_) => (C::Io, "io"),
             SalamanderError::ResourceLimit { .. } => (C::ResourceLimit, "resource_limit"),
             SalamanderError::OffsetBeyondHead(_) => (C::InvalidArgument, "offset_beyond_head"),
+            SalamanderError::PositionUnavailable { .. } => {
+                (C::InvalidArgument, "position_unavailable")
+            }
             SalamanderError::BranchArchived(_) => (C::Conflict, "branch_archived"),
             SalamanderError::Migration(_) | SalamanderError::MigrationIncomplete(_) => {
                 (C::Internal, "migration")
@@ -114,6 +162,7 @@ impl From<SalamanderError> for EngineError {
             category,
             code,
             message: error.to_string(),
+            feed_bootstrap: None,
         }
     }
 }
@@ -139,6 +188,8 @@ pub struct EngineOptions {
     pub snapshot_every_events: Option<u64>,
     pub snapshot_every_bytes: Option<u64>,
     pub snapshot_every_millis: Option<u64>,
+    #[doc(hidden)]
+    pub segment_max_bytes: Option<u64>,
 }
 
 impl EngineOptions {
@@ -151,6 +202,7 @@ impl EngineOptions {
             snapshot_every_events: None,
             snapshot_every_bytes: None,
             snapshot_every_millis: None,
+            segment_max_bytes: None,
         }
     }
 }
@@ -359,6 +411,22 @@ impl Default for FeedRequest {
     }
 }
 
+fn retention_scope(filter: &FeedFilter) -> crate::RetentionFeedScope {
+    crate::RetentionFeedScope {
+        branches: filter.branches.clone(),
+        streams: filter.streams.clone(),
+        event_types: filter.event_types.clone(),
+    }
+}
+
+fn feed_filter(scope: &crate::RetentionFeedScope) -> FeedFilter {
+    FeedFilter {
+        branches: scope.branches.clone(),
+        streams: scope.streams.clone(),
+        event_types: scope.event_types.clone(),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 /// Sequencer-owned identifier for an open feed.
 pub struct FeedHandle(pub u64);
@@ -389,6 +457,9 @@ struct ConsumerCheckpoint {
     consumer_id: String,
     position: u64,
 }
+
+type BranchBootstrapMap = HashMap<[u8; 16], crate::RetentionBranchBootstrap>;
+type ConsumerBootstrapMap = HashMap<String, crate::RetentionConsumerBootstrap>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryDefinition {
@@ -687,6 +758,39 @@ impl Engine {
         self.call(Command::UncommittedCount)
     }
 
+    pub fn retention_floor(&self) -> Result<u64, EngineError> {
+        self.call(Command::RetentionFloor)
+    }
+
+    pub fn retention_status(&self, keep_from: Option<u64>) -> Result<RetentionStatus, EngineError> {
+        self.call(|reply| Command::RetentionStatus(keep_from, reply))
+    }
+
+    pub fn plan_retention(&self, keep_from: u64) -> Result<RetentionPlan, EngineError> {
+        self.call(|reply| Command::PlanRetention(keep_from, reply))
+    }
+
+    pub fn plan_retention_policy(
+        &self,
+        policy: RetentionPolicy,
+    ) -> Result<RetentionPolicyPreview, EngineError> {
+        self.call(|reply| Command::PlanRetentionPolicy(policy, reply))
+    }
+
+    pub fn create_retention_anchor(
+        &self,
+        keep_from: u64,
+    ) -> Result<crate::RetentionAnchorInfo, EngineError> {
+        self.call(|reply| Command::CreateRetentionAnchor(keep_from, reply))
+    }
+
+    pub fn apply_retention(
+        &self,
+        plan_id: [u8; 16],
+    ) -> Result<crate::RetentionApplyResult, EngineError> {
+        self.call(|reply| Command::ApplyRetention(plan_id, reply))
+    }
+
     pub fn fork(
         &self,
         parent: [u8; 16],
@@ -796,6 +900,93 @@ impl Engine {
 
     pub fn clear_consumer_checkpoint(&self, consumer_id: String) -> Result<(), EngineError> {
         self.call(|reply| Command::ClearConsumerCheckpoint(consumer_id, reply))
+    }
+
+    pub fn register_branch_bootstrap(
+        &self,
+        branch_id: [u8; 16],
+        keep_from: u64,
+        checkpoint: Vec<u8>,
+    ) -> Result<u64, EngineError> {
+        self.call(|reply| Command::RegisterBranchBootstrap(branch_id, keep_from, checkpoint, reply))
+    }
+
+    pub fn register_consumer_bootstrap(
+        &self,
+        consumer_id: String,
+        keep_from: u64,
+        checkpoint: Vec<u8>,
+    ) -> Result<u64, EngineError> {
+        self.register_consumer_bootstrap_for_feed(
+            consumer_id,
+            keep_from,
+            FeedFilter::default(),
+            checkpoint,
+        )
+    }
+
+    pub fn register_consumer_bootstrap_for_feed(
+        &self,
+        consumer_id: String,
+        keep_from: u64,
+        filter: FeedFilter,
+        checkpoint: Vec<u8>,
+    ) -> Result<u64, EngineError> {
+        self.register_consumer_bootstrap_for_feed_with_codec(
+            consumer_id,
+            keep_from,
+            filter,
+            "opaque".into(),
+            1,
+            checkpoint,
+        )
+    }
+
+    pub fn register_consumer_bootstrap_for_feed_with_codec(
+        &self,
+        consumer_id: String,
+        keep_from: u64,
+        filter: FeedFilter,
+        codec: String,
+        codec_version: u32,
+        checkpoint: Vec<u8>,
+    ) -> Result<u64, EngineError> {
+        self.call(|reply| {
+            Command::RegisterConsumerBootstrap(
+                consumer_id,
+                keep_from,
+                retention_scope(&filter),
+                codec,
+                codec_version,
+                checkpoint,
+                reply,
+            )
+        })
+    }
+
+    pub fn fetch_feed_bootstrap(
+        &self,
+        descriptor: FeedBootstrapDescriptor,
+        maximum_bytes: usize,
+    ) -> Result<Vec<u8>, EngineError> {
+        self.call(|reply| Command::FetchFeedBootstrap(descriptor, maximum_bytes, reply))
+    }
+
+    pub fn resume_feed(
+        &self,
+        descriptor: FeedBootstrapDescriptor,
+        page_batches: u32,
+        page_bytes: usize,
+    ) -> Result<FeedHandle, EngineError> {
+        self.call(|reply| Command::ResumeFeed(descriptor, page_batches, page_bytes, reply))
+    }
+
+    pub fn branch_bootstrap(&self, branch_id: [u8; 16]) -> Result<Option<Vec<u8>>, EngineError> {
+        self.call(|reply| Command::BranchBootstrap(branch_id, reply))
+    }
+
+    pub fn consumer_bootstrap(&self, consumer_id: String) -> Result<Option<Vec<u8>>, EngineError> {
+        self.call(|reply| Command::ConsumerBootstrap(consumer_id, reply))
     }
 
     pub fn ingest_batch(&self, batch: CommittedBatch) -> Result<AppendReceiptDto, EngineError> {
@@ -948,6 +1139,24 @@ enum Command {
     Head(mpsc::SyncSender<Result<u64, EngineError>>),
     DurableHead(mpsc::SyncSender<Result<u64, EngineError>>),
     UncommittedCount(mpsc::SyncSender<Result<u64, EngineError>>),
+    RetentionFloor(mpsc::SyncSender<Result<u64, EngineError>>),
+    RetentionStatus(
+        Option<u64>,
+        mpsc::SyncSender<Result<RetentionStatus, EngineError>>,
+    ),
+    PlanRetention(u64, mpsc::SyncSender<Result<RetentionPlan, EngineError>>),
+    PlanRetentionPolicy(
+        RetentionPolicy,
+        mpsc::SyncSender<Result<RetentionPolicyPreview, EngineError>>,
+    ),
+    CreateRetentionAnchor(
+        u64,
+        mpsc::SyncSender<Result<crate::RetentionAnchorInfo, EngineError>>,
+    ),
+    ApplyRetention(
+        [u8; 16],
+        mpsc::SyncSender<Result<crate::RetentionApplyResult, EngineError>>,
+    ),
     Fork {
         parent: [u8; 16],
         at: u64,
@@ -984,6 +1193,40 @@ enum Command {
     CancelFeed(FeedHandle, mpsc::SyncSender<Result<(), EngineError>>),
     CloseFeed(FeedHandle, mpsc::SyncSender<Result<(), EngineError>>),
     ClearConsumerCheckpoint(String, mpsc::SyncSender<Result<(), EngineError>>),
+    RegisterBranchBootstrap(
+        [u8; 16],
+        u64,
+        Vec<u8>,
+        mpsc::SyncSender<Result<u64, EngineError>>,
+    ),
+    RegisterConsumerBootstrap(
+        String,
+        u64,
+        crate::RetentionFeedScope,
+        String,
+        u32,
+        Vec<u8>,
+        mpsc::SyncSender<Result<u64, EngineError>>,
+    ),
+    FetchFeedBootstrap(
+        FeedBootstrapDescriptor,
+        usize,
+        mpsc::SyncSender<Result<Vec<u8>, EngineError>>,
+    ),
+    ResumeFeed(
+        FeedBootstrapDescriptor,
+        u32,
+        usize,
+        mpsc::SyncSender<Result<FeedHandle, EngineError>>,
+    ),
+    BranchBootstrap(
+        [u8; 16],
+        mpsc::SyncSender<Result<Option<Vec<u8>>, EngineError>>,
+    ),
+    ConsumerBootstrap(
+        String,
+        mpsc::SyncSender<Result<Option<Vec<u8>>, EngineError>>,
+    ),
     IngestBatch(
         CommittedBatch,
         mpsc::SyncSender<Result<AppendReceiptDto, EngineError>>,
@@ -1246,7 +1489,13 @@ fn sequencer(
     if let Some(value) = options.commit_every_millis {
         policy = policy.and_millis(value);
     }
-    let mut db: Salamander<EngineEvent> = match Salamander::open_with_policy(options.path, policy) {
+    let opened = match options.segment_max_bytes {
+        Some(maximum) => {
+            Salamander::open_with_policy_and_segment_max(options.path, policy, maximum)
+        }
+        None => Salamander::open_with_policy(options.path, policy),
+    };
+    let mut db: Salamander<EngineEvent> = match opened {
         Ok(db) => db,
         Err(error) => {
             let _ = ready.send(Err(error.into()));
@@ -1256,6 +1505,9 @@ fn sequencer(
     let mut readers = HashMap::new();
     let mut feeds = HashMap::new();
     let mut consumer_checkpoints = restore_consumer_checkpoints(&db).unwrap_or_default();
+    let mut issued_retention_plans = HashMap::new();
+    let (mut branch_bootstraps, mut consumer_bootstraps) =
+        restore_retention_bootstraps(&db).unwrap_or_default();
     let mut next_handle = 1u64;
     let (mut queries, mut query_names) = match restore_projections(&db, &mut next_handle) {
         Ok(registry) => registry,
@@ -1313,6 +1565,309 @@ fn sequencer(
             }
             Command::UncommittedCount(reply) => {
                 let _ = reply.send(Ok(db.uncommitted_count()));
+            }
+            Command::RetentionFloor(reply) => {
+                let _ = reply.send(Ok(db.retention_floor()));
+            }
+            Command::RetentionStatus(keep_from, reply) => {
+                let result = (|| {
+                    let requested_floor = keep_from.unwrap_or_else(|| db.durable_head());
+                    let mut plan = db
+                        .plan_retention(requested_floor)
+                        .map_err(EngineError::from)?;
+                    plan.blockers.extend(
+                        queries
+                            .values()
+                            .filter(|state| {
+                                !db.has_retention_projection_coverage(
+                                    &state.descriptor.name,
+                                    descriptor_fingerprint(&state.descriptor),
+                                    state.descriptor.scope.branch_id,
+                                    state.descriptor.partition_scheme.partition_count,
+                                )
+                            })
+                            .map(
+                                |state| crate::RetentionBlocker::ProjectionRequiresBootstrap {
+                                    name: state.descriptor.name.clone(),
+                                },
+                            ),
+                    );
+                    plan.blockers.extend(
+                        consumer_checkpoints
+                            .iter()
+                            .filter(|(consumer_id, position)| {
+                                **position < plan.effective_floor
+                                    && !db.has_retention_consumer_bootstrap(
+                                        consumer_id,
+                                        plan.effective_floor,
+                                    )
+                            })
+                            .map(|(consumer_id, position)| {
+                                crate::RetentionBlocker::ConsumerRequiresBootstrap {
+                                    consumer_id: consumer_id.clone(),
+                                    position: *position,
+                                }
+                            }),
+                    );
+                    if !readers.is_empty() || !feeds.is_empty() {
+                        plan.blockers
+                            .push(crate::RetentionBlocker::MaintenanceHandlesOpen {
+                                readers: readers.len(),
+                                feeds: feeds.len(),
+                            });
+                    }
+                    let mut consumers = consumer_checkpoints
+                        .iter()
+                        .map(|(consumer_id, position)| RetentionConsumerStatus {
+                            consumer_id: consumer_id.clone(),
+                            position: *position,
+                            behind_effective_floor: *position < plan.effective_floor,
+                            bootstrap_available: db.has_retention_consumer_bootstrap(
+                                consumer_id,
+                                plan.effective_floor,
+                            ),
+                        })
+                        .collect::<Vec<_>>();
+                    consumers.sort_by(|left, right| left.consumer_id.cmp(&right.consumer_id));
+                    let (database_id, generation) = db.retention_identity();
+                    let anchor_ready = !plan
+                        .blockers
+                        .contains(&crate::RetentionBlocker::EngineAnchorUnavailable);
+                    Ok(RetentionStatus {
+                        database_id,
+                        generation,
+                        floor: db.retention_floor(),
+                        durable_head: db.durable_head(),
+                        requested_floor: plan.requested_floor,
+                        effective_floor: plan.effective_floor,
+                        anchor_ready,
+                        reclaimable_segments: plan.reclaimable_segments,
+                        reclaimable_bytes: plan.reclaimable_bytes,
+                        blockers: plan.blockers,
+                        open_readers: readers.len(),
+                        open_feeds: feeds.len(),
+                        consumers,
+                        cleanup: db.retention_cleanup_status(),
+                    })
+                })();
+                let _ = reply.send(result);
+            }
+            Command::PlanRetentionPolicy(policy, reply) => {
+                let result = db.preview_retention_policy(policy).map(|mut preview| {
+                    preview.plan.blockers.extend(
+                        queries
+                            .values()
+                            .filter(|state| {
+                                !db.has_retention_projection_coverage(
+                                    &state.descriptor.name,
+                                    descriptor_fingerprint(&state.descriptor),
+                                    state.descriptor.scope.branch_id,
+                                    state.descriptor.partition_scheme.partition_count,
+                                )
+                            })
+                            .map(
+                                |state| crate::RetentionBlocker::ProjectionRequiresBootstrap {
+                                    name: state.descriptor.name.clone(),
+                                },
+                            ),
+                    );
+                    preview.plan.blockers.extend(
+                        consumer_checkpoints
+                            .iter()
+                            .filter(|(consumer_id, position)| {
+                                **position < preview.plan.effective_floor
+                                    && !db.has_retention_consumer_bootstrap(
+                                        consumer_id,
+                                        preview.plan.effective_floor,
+                                    )
+                            })
+                            .map(|(consumer_id, position)| {
+                                crate::RetentionBlocker::ConsumerRequiresBootstrap {
+                                    consumer_id: consumer_id.clone(),
+                                    position: *position,
+                                }
+                            }),
+                    );
+                    if !readers.is_empty() || !feeds.is_empty() {
+                        preview.plan.blockers.push(
+                            crate::RetentionBlocker::MaintenanceHandlesOpen {
+                                readers: readers.len(),
+                                feeds: feeds.len(),
+                            },
+                        );
+                    }
+                    issued_retention_plans.insert(preview.plan.plan_id, preview.plan.clone());
+                    preview
+                });
+                let _ = reply.send(result.map_err(Into::into));
+            }
+            Command::PlanRetention(keep_from, reply) => {
+                let result = db.plan_retention(keep_from).map(|mut plan| {
+                    plan.blockers.extend(
+                        queries
+                            .values()
+                            .filter(|state| {
+                                !db.has_retention_projection_coverage(
+                                    &state.descriptor.name,
+                                    descriptor_fingerprint(&state.descriptor),
+                                    state.descriptor.scope.branch_id,
+                                    state.descriptor.partition_scheme.partition_count,
+                                )
+                            })
+                            .map(
+                                |state| crate::RetentionBlocker::ProjectionRequiresBootstrap {
+                                    name: state.descriptor.name.clone(),
+                                },
+                            ),
+                    );
+                    plan.blockers.extend(
+                        consumer_checkpoints
+                            .iter()
+                            .filter(|(consumer_id, position)| {
+                                **position < plan.effective_floor
+                                    && !db.has_retention_consumer_bootstrap(
+                                        consumer_id,
+                                        plan.effective_floor,
+                                    )
+                            })
+                            .map(|(consumer_id, position)| {
+                                crate::RetentionBlocker::ConsumerRequiresBootstrap {
+                                    consumer_id: consumer_id.clone(),
+                                    position: *position,
+                                }
+                            }),
+                    );
+                    if !readers.is_empty() || !feeds.is_empty() {
+                        plan.blockers
+                            .push(crate::RetentionBlocker::MaintenanceHandlesOpen {
+                                readers: readers.len(),
+                                feeds: feeds.len(),
+                            });
+                    }
+                    issued_retention_plans.insert(plan.plan_id, plan.clone());
+                    plan
+                });
+                let _ = reply.send(result.map_err(Into::into));
+            }
+            Command::CreateRetentionAnchor(keep_from, reply) => {
+                let result = if readers.is_empty() && feeds.is_empty() {
+                    (|| {
+                        db.commit().map_err(EngineError::from)?;
+                        let plan = db.plan_retention(keep_from).map_err(EngineError::from)?;
+                        let mut coverage = Vec::with_capacity(queries.len());
+                        for state in queries.values() {
+                            coverage.push(create_projection_retention_coverage(&root, &db, state)?);
+                        }
+                        let branches = branch_bootstraps
+                            .values()
+                            .filter(|item| item.floor == plan.effective_floor)
+                            .cloned()
+                            .collect();
+                        let consumers = consumer_bootstraps
+                            .values()
+                            .filter(|item| item.floor == plan.effective_floor)
+                            .cloned()
+                            .collect();
+                        db.create_retention_anchor_with_all_coverage(
+                            keep_from, coverage, branches, consumers,
+                        )
+                        .map_err(Into::into)
+                    })()
+                } else {
+                    Err(EngineError {
+                        category: ErrorCategory::Conflict,
+                        code: "maintenance_handles_open",
+                        message: format!(
+                            "cannot create retention anchor with {} reader(s) and {} feed(s) open",
+                            readers.len(),
+                            feeds.len()
+                        ),
+                        feed_bootstrap: None,
+                    })
+                };
+                let _ = reply.send(result);
+            }
+            Command::ApplyRetention(plan_id, reply) => {
+                let result = (|| {
+                    let planned =
+                        issued_retention_plans
+                            .get(&plan_id)
+                            .cloned()
+                            .ok_or_else(|| EngineError {
+                                category: ErrorCategory::Conflict,
+                                code: "retention_plan_unknown",
+                                message: "retention plan is unknown or already applied".into(),
+                                feed_bootstrap: None,
+                            })?;
+                    let mut current = db
+                        .plan_retention(planned.requested_floor)
+                        .map_err(EngineError::from)?;
+                    current.blockers.extend(
+                        queries
+                            .values()
+                            .filter(|state| {
+                                !db.has_retention_projection_coverage(
+                                    &state.descriptor.name,
+                                    descriptor_fingerprint(&state.descriptor),
+                                    state.descriptor.scope.branch_id,
+                                    state.descriptor.partition_scheme.partition_count,
+                                )
+                            })
+                            .map(
+                                |state| crate::RetentionBlocker::ProjectionRequiresBootstrap {
+                                    name: state.descriptor.name.clone(),
+                                },
+                            ),
+                    );
+                    current.blockers.extend(
+                        consumer_checkpoints
+                            .iter()
+                            .filter(|(consumer_id, position)| {
+                                **position < current.effective_floor
+                                    && !db.has_retention_consumer_bootstrap(
+                                        consumer_id,
+                                        current.effective_floor,
+                                    )
+                            })
+                            .map(|(consumer_id, position)| {
+                                crate::RetentionBlocker::ConsumerRequiresBootstrap {
+                                    consumer_id: consumer_id.clone(),
+                                    position: *position,
+                                }
+                            }),
+                    );
+                    if !readers.is_empty() || !feeds.is_empty() {
+                        current
+                            .blockers
+                            .push(crate::RetentionBlocker::MaintenanceHandlesOpen {
+                                readers: readers.len(),
+                                feeds: feeds.len(),
+                            });
+                    }
+                    current.plan_id = planned.plan_id;
+                    if current != planned {
+                        return Err(EngineError {
+                            category: ErrorCategory::Conflict,
+                            code: "retention_plan_stale",
+                            message: "retention plan no longer matches database state".into(),
+                            feed_bootstrap: None,
+                        });
+                    }
+                    if !planned.blockers.is_empty() {
+                        return Err(EngineError {
+                            category: ErrorCategory::Conflict,
+                            code: "retention_blocked",
+                            message: "retention plan still has unresolved blockers".into(),
+                            feed_bootstrap: None,
+                        });
+                    }
+                    let applied = db
+                        .apply_retention_prevalidated(planned.effective_floor, planned.durable_head)
+                        .map_err(EngineError::from)?;
+                    issued_retention_plans.remove(&plan_id);
+                    Ok(applied)
+                })();
+                let _ = reply.send(result);
             }
             Command::Fork {
                 parent,
@@ -1397,15 +1952,25 @@ fn sequencer(
                 let _ = reply.send(result);
             }
             Command::OpenFeed(mut request, reply) => {
-                let result = validate_feed(&request, db.durable_head()).map(|_| {
-                    let continuation = request.from.unwrap_or_else(|| {
-                        request
-                            .consumer_id
-                            .as_ref()
-                            .and_then(|id| consumer_checkpoints.get(id))
-                            .copied()
-                            .unwrap_or(0)
-                    });
+                let continuation = request.from.unwrap_or_else(|| {
+                    request
+                        .consumer_id
+                        .as_ref()
+                        .and_then(|id| consumer_checkpoints.get(id))
+                        .copied()
+                        .unwrap_or(0)
+                });
+                let bootstrap = request
+                    .consumer_id
+                    .as_deref()
+                    .and_then(|id| feed_bootstrap_descriptor(&db, id, &request.filter));
+                let mut result = validate_feed(
+                    &request,
+                    continuation,
+                    db.retention_floor(),
+                    db.durable_head(),
+                )
+                .map(|_| {
                     request.from = Some(continuation);
                     let handle = FeedHandle(next_handle);
                     next_handle += 1;
@@ -1419,6 +1984,11 @@ fn sequencer(
                     );
                     handle
                 });
+                if let Err(error) = &mut result {
+                    if error.code == "position_unavailable" {
+                        error.feed_bootstrap = bootstrap.map(Box::new);
+                    }
+                }
                 let _ = reply.send(result);
             }
             Command::NextFeedPage(handle, reply) => {
@@ -1460,6 +2030,89 @@ fn sequencer(
                     consumer_checkpoints.remove(&id);
                 });
                 let _ = reply.send(result);
+            }
+            Command::RegisterBranchBootstrap(branch_id, keep_from, checkpoint, reply) => {
+                let result = register_branch_bootstrap(&mut db, branch_id, keep_from, checkpoint)
+                    .map(|bootstrap| {
+                        let floor = bootstrap.floor;
+                        branch_bootstraps.insert(branch_id, bootstrap);
+                        floor
+                    });
+                let _ = reply.send(result);
+            }
+            Command::RegisterConsumerBootstrap(
+                id,
+                keep_from,
+                scope,
+                codec,
+                codec_version,
+                checkpoint,
+                reply,
+            ) => {
+                let result = register_consumer_bootstrap(
+                    &mut db,
+                    &id,
+                    keep_from,
+                    scope,
+                    codec,
+                    codec_version,
+                    checkpoint,
+                )
+                .map(|bootstrap| {
+                    let floor = bootstrap.floor;
+                    consumer_bootstraps.insert(id.clone(), bootstrap);
+                    floor
+                });
+                let _ = reply.send(result);
+            }
+            Command::FetchFeedBootstrap(descriptor, maximum_bytes, reply) => {
+                let result =
+                    validate_feed_bootstrap_descriptor(&db, &descriptor).and_then(|bootstrap| {
+                        if maximum_bytes == 0 || bootstrap.checkpoint.len() > maximum_bytes {
+                            return Err(resource(
+                                "feed bootstrap bytes",
+                                bootstrap.checkpoint.len(),
+                                maximum_bytes,
+                            ));
+                        }
+                        Ok(bootstrap.checkpoint)
+                    });
+                let _ = reply.send(result);
+            }
+            Command::ResumeFeed(descriptor, page_batches, page_bytes, reply) => {
+                let result = validate_feed_bootstrap_descriptor(&db, &descriptor).and_then(|_| {
+                    let request = FeedRequest {
+                        from: Some(descriptor.resume_from),
+                        consumer_id: Some(descriptor.consumer_id.clone()),
+                        filter: feed_filter(&descriptor.scope),
+                        page_batches,
+                        page_bytes,
+                    };
+                    validate_feed(
+                        &request,
+                        descriptor.resume_from,
+                        db.retention_floor(),
+                        db.durable_head(),
+                    )?;
+                    let handle = FeedHandle(next_handle);
+                    next_handle += 1;
+                    feeds.insert(
+                        handle,
+                        FeedState {
+                            continuation: descriptor.resume_from,
+                            request,
+                            cancelled: false,
+                        },
+                    );
+                    Ok(handle)
+                });
+                let _ = reply.send(result);
+            }
+            Command::BranchBootstrap(branch_id, reply) => {
+                let _ = reply.send(Ok(db.retention_branch_bootstrap(branch_id)));
+            }
+            Command::ConsumerBootstrap(id, reply) => {
+                let _ = reply.send(Ok(db.retention_consumer_bootstrap(&id)));
             }
             Command::IngestBatch(batch, reply) => {
                 let result = ingest_batch(&mut db, batch);
@@ -1666,6 +2319,7 @@ fn append(
                     category: ErrorCategory::Codec,
                     code: "invalid_json",
                     message: e.to_string(),
+                    feed_bootstrap: None,
                 }
             })?;
         }
@@ -1747,7 +2401,11 @@ fn diff_dto(db: &Salamander<EngineEvent>, request: DiffRequestDto) -> Result<Dif
         page_bytes: request.page_bytes,
     };
     Ok(DiffDto {
-        shared: replay(diff.common_ancestor.id, 0, diff.divergence),
+        shared: replay(
+            diff.common_ancestor.id,
+            db.retention_floor(),
+            diff.divergence,
+        ),
         common_ancestor: branch_dto(diff.common_ancestor),
         divergence_position: diff.divergence,
         left: DiffSideDto {
@@ -1801,6 +2459,7 @@ fn next_page(
             category: ErrorCategory::Cancelled,
             code: "cancelled",
             message: "reader was cancelled".into(),
+            feed_bootstrap: None,
         });
     }
     let mut reader = db
@@ -1868,6 +2527,7 @@ fn record_dto(record: OwnedStoredRecord) -> Result<RecordDto, EngineError> {
         category: ErrorCategory::Codec,
         code: "codec",
         message: e.to_string(),
+        feed_bootstrap: None,
     })?;
     Ok(RecordDto {
         database_id: record.envelope.database_id.into_bytes(),
@@ -1887,7 +2547,12 @@ fn record_dto(record: OwnedStoredRecord) -> Result<RecordDto, EngineError> {
     })
 }
 
-fn validate_feed(request: &FeedRequest, durable_head: u64) -> Result<(), EngineError> {
+fn validate_feed(
+    request: &FeedRequest,
+    continuation: u64,
+    retention_floor: u64,
+    durable_head: u64,
+) -> Result<(), EngineError> {
     if request.page_batches == 0 || request.page_batches > MAX_REPLAY_PAGE_EVENTS {
         return Err(resource(
             "feed page batches",
@@ -1902,12 +2567,21 @@ fn validate_feed(request: &FeedRequest, durable_head: u64) -> Result<(), EngineE
             MAX_REPLAY_PAGE_BYTES,
         ));
     }
-    if request.from.is_some_and(|position| position > durable_head) {
+    if continuation > durable_head {
         return Err(EngineError {
             category: ErrorCategory::InvalidArgument,
             code: "position_unavailable",
             message: format!("feed position is beyond durable head {durable_head}"),
+            feed_bootstrap: None,
         });
+    }
+    if continuation < retention_floor {
+        return Err(EngineError::from(SalamanderError::PositionUnavailable {
+            requested: continuation,
+            floor: retention_floor,
+            head: durable_head,
+            bootstrap_available: false,
+        }));
     }
     if request
         .consumer_id
@@ -1925,6 +2599,7 @@ fn feed_page(db: &Salamander<EngineEvent>, state: &mut FeedState) -> Result<Feed
             category: ErrorCategory::Cancelled,
             code: "cancelled",
             message: "feed was cancelled".into(),
+            feed_bootstrap: None,
         });
     }
     let durable_head = db.durable_head();
@@ -2042,16 +2717,15 @@ fn restore_consumer_checkpoints(
     db: &Salamander<EngineEvent>,
 ) -> Result<HashMap<String, u64>, EngineError> {
     let mut checkpoints = HashMap::new();
-    for item in db.log.system_records() {
-        let record = item.map_err(EngineError::from)?;
-        match record.envelope.event_type.as_str() {
+    for (event_type, payload) in db.system_metadata().map_err(EngineError::from)? {
+        match event_type.as_str() {
             "salamander.consumer.checkpoint" => {
-                let checkpoint: ConsumerCheckpoint = serde_json::from_slice(&record.payload)
+                let checkpoint: ConsumerCheckpoint = serde_json::from_slice(&payload)
                     .map_err(|error| EngineError::internal(error.to_string()))?;
                 checkpoints.insert(checkpoint.consumer_id, checkpoint.position);
             }
             "salamander.consumer.cleared" => {
-                if let Ok(id) = std::str::from_utf8(&record.payload) {
+                if let Ok(id) = std::str::from_utf8(&payload) {
                     checkpoints.remove(id);
                 }
             }
@@ -2079,6 +2753,160 @@ fn clear_consumer_checkpoint(
     id: &str,
 ) -> Result<(), EngineError> {
     append_projection_system(db, "salamander.consumer.cleared", id.as_bytes())
+}
+
+fn restore_retention_bootstraps(
+    db: &Salamander<EngineEvent>,
+) -> Result<(BranchBootstrapMap, ConsumerBootstrapMap), EngineError> {
+    let mut branches = HashMap::new();
+    let mut consumers = HashMap::new();
+    for (event_type, payload) in db.system_metadata().map_err(EngineError::from)? {
+        match event_type.as_str() {
+            "salamander.retention.branch_bootstrap" => {
+                let bootstrap = serde_json::from_slice::<crate::RetentionBranchBootstrap>(&payload)
+                    .map_err(|error| EngineError::internal(error.to_string()))?;
+                branches.insert(bootstrap.branch_id, bootstrap);
+            }
+            "salamander.retention.consumer_bootstrap" => {
+                let bootstrap =
+                    serde_json::from_slice::<crate::RetentionConsumerBootstrap>(&payload)
+                        .map_err(|error| EngineError::internal(error.to_string()))?;
+                consumers.insert(bootstrap.consumer_id.clone(), bootstrap);
+            }
+            _ => {}
+        }
+    }
+    Ok((branches, consumers))
+}
+
+fn register_branch_bootstrap(
+    db: &mut Salamander<EngineEvent>,
+    branch_id: [u8; 16],
+    keep_from: u64,
+    checkpoint: Vec<u8>,
+) -> Result<crate::RetentionBranchBootstrap, EngineError> {
+    validate_bootstrap_bytes(&checkpoint)?;
+    if db.branch(BranchId::from_bytes(branch_id)).is_none() {
+        return Err(invalid("unknown branch for retention bootstrap"));
+    }
+    let floor = db
+        .plan_retention(keep_from)
+        .map_err(EngineError::from)?
+        .effective_floor;
+    let bootstrap = crate::RetentionBranchBootstrap {
+        branch_id,
+        floor,
+        checksum: crc32c::crc32c(&checkpoint),
+        checkpoint,
+    };
+    let payload =
+        serde_json::to_vec(&bootstrap).map_err(|error| EngineError::internal(error.to_string()))?;
+    append_projection_system(db, "salamander.retention.branch_bootstrap", &payload)?;
+    Ok(bootstrap)
+}
+
+fn register_consumer_bootstrap(
+    db: &mut Salamander<EngineEvent>,
+    consumer_id: &str,
+    keep_from: u64,
+    scope: crate::RetentionFeedScope,
+    codec: String,
+    codec_version: u32,
+    checkpoint: Vec<u8>,
+) -> Result<crate::RetentionConsumerBootstrap, EngineError> {
+    if consumer_id.is_empty() || consumer_id.len() > 256 {
+        return Err(invalid("consumer id must contain 1..=256 bytes"));
+    }
+    validate_bootstrap_bytes(&checkpoint)?;
+    if codec.is_empty() || codec.len() > 128 {
+        return Err(invalid("bootstrap codec must contain 1..=128 bytes"));
+    }
+    let floor = db
+        .plan_retention(keep_from)
+        .map_err(EngineError::from)?
+        .effective_floor;
+    let bootstrap = crate::RetentionConsumerBootstrap {
+        consumer_id: consumer_id.to_string(),
+        floor,
+        checksum: crc32c::crc32c(&checkpoint),
+        checkpoint,
+        checkpoint_id: crate::format::generate_id_bytes(),
+        scope,
+        codec,
+        codec_version,
+    };
+    let payload =
+        serde_json::to_vec(&bootstrap).map_err(|error| EngineError::internal(error.to_string()))?;
+    append_projection_system(db, "salamander.retention.consumer_bootstrap", &payload)?;
+    Ok(bootstrap)
+}
+
+fn feed_bootstrap_descriptor(
+    db: &Salamander<EngineEvent>,
+    consumer_id: &str,
+    filter: &FeedFilter,
+) -> Option<FeedBootstrapDescriptor> {
+    let bootstrap = db.retention_consumer_bootstrap_info(consumer_id)?;
+    if bootstrap.floor != db.retention_floor() || bootstrap.scope != retention_scope(filter) {
+        return None;
+    }
+    let (database_id, generation) = db.retention_identity();
+    Some(FeedBootstrapDescriptor {
+        database_id,
+        generation,
+        floor: bootstrap.floor,
+        consumer_id: bootstrap.consumer_id,
+        checkpoint_id: bootstrap.checkpoint_id,
+        scope: bootstrap.scope,
+        byte_length: bootstrap.checkpoint.len() as u64,
+        checksum: bootstrap.checksum,
+        resume_from: bootstrap.floor,
+        codec: bootstrap.codec,
+        codec_version: bootstrap.codec_version,
+    })
+}
+
+fn validate_feed_bootstrap_descriptor(
+    db: &Salamander<EngineEvent>,
+    descriptor: &FeedBootstrapDescriptor,
+) -> Result<crate::RetentionConsumerBootstrap, EngineError> {
+    let (database_id, generation) = db.retention_identity();
+    let bootstrap = db
+        .retention_consumer_bootstrap_info(&descriptor.consumer_id)
+        .ok_or_else(|| not_found("feed bootstrap"))?;
+    let matches = descriptor.database_id == database_id
+        && descriptor.generation == generation
+        && descriptor.floor == db.retention_floor()
+        && descriptor.floor == bootstrap.floor
+        && descriptor.resume_from == bootstrap.floor
+        && descriptor.checkpoint_id == bootstrap.checkpoint_id
+        && descriptor.scope == bootstrap.scope
+        && descriptor.byte_length == bootstrap.checkpoint.len() as u64
+        && descriptor.checksum == bootstrap.checksum
+        && descriptor.codec == bootstrap.codec
+        && descriptor.codec_version == bootstrap.codec_version
+        && crc32c::crc32c(&bootstrap.checkpoint) == bootstrap.checksum;
+    if !matches {
+        return Err(EngineError {
+            category: ErrorCategory::Conflict,
+            code: "feed_bootstrap_mismatch",
+            message: "feed bootstrap descriptor does not match the current retention generation"
+                .into(),
+            feed_bootstrap: None,
+        });
+    }
+    Ok(bootstrap)
+}
+
+fn validate_bootstrap_bytes(checkpoint: &[u8]) -> Result<(), EngineError> {
+    if checkpoint.len() > MAX_FACADE_PAYLOAD_BYTES {
+        return Err(resource(
+            "retention bootstrap bytes",
+            checkpoint.len(),
+            MAX_FACADE_PAYLOAD_BYTES,
+        ));
+    }
+    Ok(())
 }
 
 fn ingest_batch(
@@ -2296,18 +3124,17 @@ fn restore_projections(
     next_handle: &mut u64,
 ) -> Result<ProjectionRegistry, EngineError> {
     let mut registrations: BTreeMap<String, DurableProjectionRegistration> = BTreeMap::new();
-    for item in db.log.system_records() {
-        let record = item.map_err(EngineError::from)?;
-        match record.envelope.event_type.as_str() {
+    for (event_type, payload) in db.system_metadata().map_err(EngineError::from)? {
+        match event_type.as_str() {
             "salamander.projection.registered" => {
-                let registration: DurableProjectionRegistration =
-                    serde_json::from_slice(&record.payload).map_err(|error| {
+                let registration: DurableProjectionRegistration = serde_json::from_slice(&payload)
+                    .map_err(|error| {
                         EngineError::internal(format!("projection descriptor: {error}"))
                     })?;
                 registrations.insert(registration.descriptor.name.clone(), registration);
             }
             "salamander.projection.dropped" => {
-                if let Ok(name) = std::str::from_utf8(&record.payload) {
+                if let Ok(name) = std::str::from_utf8(&payload) {
                     registrations.remove(name);
                 }
             }
@@ -2403,6 +3230,7 @@ fn create_snapshot(
                 category: ErrorCategory::Conflict,
                 code: "projection_not_ready",
                 message: "only a ready projection can be snapshotted".into(),
+                feed_bootstrap: None,
             });
         }
     };
@@ -2481,6 +3309,48 @@ fn create_snapshot(
     crate::snapshot::publish(root, manifest, &bytes)
 }
 
+fn create_projection_retention_coverage(
+    root: &std::path::Path,
+    db: &Salamander<EngineEvent>,
+    state: &QueryState,
+) -> Result<crate::RetentionProjectionCoverage, EngineError> {
+    create_snapshot(root, db, state)?;
+    let fingerprint = descriptor_fingerprint(&state.descriptor);
+    let head = db.durable_head();
+    let count = state.descriptor.partition_scheme.partition_count;
+    let mut partitions = BTreeMap::new();
+    for info in crate::snapshot::list(root, fingerprint) {
+        let manifest = &info.manifest;
+        if manifest.cursor.position == head
+            && manifest.branch_id == state.descriptor.scope.branch_id
+            && manifest.partition_count.unwrap_or(1) == count
+        {
+            partitions
+                .entry(manifest.partition.unwrap_or(0))
+                .or_insert(info.id);
+        }
+    }
+    if partitions.len() != count as usize {
+        return Err(EngineError {
+            category: ErrorCategory::Conflict,
+            code: "projection_bootstrap_incomplete",
+            message: format!(
+                "projection {} has {} of {count} required retention checkpoints",
+                state.descriptor.name,
+                partitions.len()
+            ),
+            feed_bootstrap: None,
+        });
+    }
+    Ok(crate::RetentionProjectionCoverage {
+        name: state.descriptor.name.clone(),
+        descriptor_fingerprint: fingerprint,
+        branch_id: state.descriptor.scope.branch_id,
+        cursor: head,
+        snapshot_ids: partitions.into_values().collect(),
+    })
+}
+
 fn create_one_partition_snapshot(
     root: &std::path::Path,
     db: &Salamander<EngineEvent>,
@@ -2495,6 +3365,7 @@ fn create_one_partition_snapshot(
                 category: ErrorCategory::Conflict,
                 code: "partition_not_ready",
                 message: "only a ready partition can be snapshotted".into(),
+                feed_bootstrap: None,
             })
         }
     };
@@ -2679,6 +3550,7 @@ fn query_projection(
             category: ErrorCategory::Conflict,
             code: "projection_not_ready",
             message: format!("projection status is {:?}", state.status),
+            feed_bootstrap: None,
         });
     }
     state.runtime.query(operation).map_err(projection_error)
@@ -2930,6 +3802,7 @@ fn query_touched_partitions(
             category: ErrorCategory::Conflict,
             code: "projection_not_ready",
             message: "one or more requested partitions are not ready".into(),
+            feed_bootstrap: None,
         });
     }
     state.runtime.query(operation).map_err(projection_error)
@@ -3021,6 +3894,7 @@ fn projection_error(error: ProjectionFailure) -> EngineError {
         category: ErrorCategory::Internal,
         code: "projection",
         message: format!("{}: {}", error.code, error.message),
+        feed_bootstrap: None,
     }
 }
 
@@ -3060,6 +3934,7 @@ fn invalid(message: impl Into<String>) -> EngineError {
         category: ErrorCategory::InvalidArgument,
         code: "invalid_argument",
         message: message.into(),
+        feed_bootstrap: None,
     }
 }
 fn not_found(kind: &str) -> EngineError {
@@ -3067,6 +3942,7 @@ fn not_found(kind: &str) -> EngineError {
         category: ErrorCategory::NotFound,
         code: "not_found",
         message: format!("{kind} handle was not found"),
+        feed_bootstrap: None,
     }
 }
 fn resource(name: &'static str, actual: usize, maximum: usize) -> EngineError {
@@ -3074,6 +3950,7 @@ fn resource(name: &'static str, actual: usize, maximum: usize) -> EngineError {
         category: ErrorCategory::ResourceLimit,
         code: "resource_limit",
         message: format!("{name} is {actual}, maximum is {maximum}"),
+        feed_bootstrap: None,
     }
 }
 

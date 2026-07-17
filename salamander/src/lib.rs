@@ -61,6 +61,7 @@ mod facade;
 mod log;
 mod migration;
 mod projection;
+mod retention;
 mod snapshot;
 mod stream;
 
@@ -90,11 +91,12 @@ pub use event::{Body, Event};
 pub use facade::{
     AppendBatch as EngineAppendBatch, AppendReceiptDto as EngineAppendReceipt, BranchDto,
     CommittedBatch, DiffDto, DiffRequestDto, DiffSideDto, DurabilityDto, Engine, EngineError,
-    EngineOptions, ErrorCategory, EventData, ExpectedRevisionDto, FeedFilter, FeedHandle, FeedPage,
-    FeedRequest, InputType, PartitionScheme, PartitionStatus, PayloadCodec, ProjectionCursor,
-    ProjectionDescriptor, ProjectionFailure, ProjectionRuntime, ProjectionScope, ProjectionStatus,
-    QueryConsistency, QueryDefinition, QueryHandle, QueryOperation, QueryResult, ReaderHandle,
-    RecordDto, ReplayPage, ReplayRequest, StaleReason, MAX_FACADE_BATCH_BYTES,
+    EngineOptions, ErrorCategory, EventData, ExpectedRevisionDto, FeedBootstrapDescriptor,
+    FeedFilter, FeedHandle, FeedPage, FeedRequest, InputType, PartitionScheme, PartitionStatus,
+    PayloadCodec, ProjectionCursor, ProjectionDescriptor, ProjectionFailure, ProjectionRuntime,
+    ProjectionScope, ProjectionStatus, QueryConsistency, QueryDefinition, QueryHandle,
+    QueryOperation, QueryResult, ReaderHandle, RecordDto, ReplayPage, ReplayRequest,
+    RetentionConsumerStatus, RetentionStatus, StaleReason, MAX_FACADE_BATCH_BYTES,
     MAX_FACADE_PAYLOAD_BYTES, MAX_REPLAY_PAGE_BYTES, MAX_REPLAY_PAGE_EVENTS,
 };
 pub use format::{
@@ -109,9 +111,17 @@ pub use projection::{NamespaceScoped, Projection};
 pub use view::{Change, IndexKey, IndexedView, View};
 
 pub use agent::AgentDb;
-pub use db::{DiffRequest, DiffSide, Salamander, TimelineDiff};
+pub use db::{
+    DiffRequest, DiffSide, RetentionApplyResult, RetentionBlocker, RetentionCleanupStatus,
+    RetentionPlan, RetentionPolicy, RetentionPolicyPreview, RetentionSegment, Salamander,
+    TimelineDiff,
+};
 pub use json::{Json, JsonDb};
 pub use migration::{migrate_legacy_branches, migrate_v1, BranchMigrationReport, MigrationReport};
+pub use retention::{
+    RetentionAnchorInfo, RetentionBranchBootstrap, RetentionConsumerBootstrap, RetentionFeedScope,
+    RetentionProjectionCoverage, MAX_BOOTSTRAP_BYTES,
+};
 // Snapshot descriptors are surfaced only through the engine facade
 // (snapshot management is not on the typed `Salamander` API — instant
 // recovery uses snapshots internally). Reachable for bindings, hidden from

@@ -57,6 +57,52 @@ def test_group_commit_policy(tmp_path):
     assert db.uncommitted_count() == 0  # count=2 policy fsynced
 
 
+def test_retention_floor_and_plan_are_non_destructive(tmp_path):
+    with salamander.open(str(tmp_path / "retention")) as db:
+        db.append("s", {"n": 1})
+        db.commit()
+        assert db.retention_floor() == 0
+        plan = db.plan_retention(db.durable_head())
+        assert plan["requested_floor"] == 1
+        assert plan["current_floor"] == 0
+        assert plan["effective_floor"] == 0
+        assert plan["reclaimable_segments"] == []
+        assert plan["blockers"][0]["kind"] == "engine_anchor_unavailable"
+        status = db.retention_status(db.durable_head())
+        assert status["database_id"]
+        assert status["generation"] == 0
+        assert status["anchor_ready"] is False
+        assert status["cleanup"] == {
+            "complete": True,
+            "pending_bytes": 0,
+            "pending_segments": [],
+        }
+        latest = db.plan_retention_policy("keep_latest_events", 1)
+        assert latest["selected_floor"] == 0
+        assert latest["target_satisfied"] is True
+        assert latest["plan"]["effective_floor"] == 0
+        impossible = db.plan_retention_policy("target_log_bytes", 0)
+        assert impossible["target_satisfied"] is False
+        assert db.register_branch_bootstrap("main", db.durable_head(), b"root") == 0
+        assert (
+            db.register_consumer_bootstrap(
+                "example-consumer", db.durable_head(), b"consumer"
+            )
+            == 0
+        )
+        anchor = db.create_retention_anchor(db.durable_head())
+        assert anchor["projection_checkpoints"] == 0
+        assert anchor["branch_bootstraps"] == 1
+        assert anchor["consumer_bootstraps"] == 1
+        ready = db.plan_retention(db.durable_head())
+        assert ready["blockers"] == []
+        assert db.retention_status(db.durable_head())["anchor_ready"] is True
+        applied = db.apply_retention(ready["plan_id"])
+        assert applied["floor"] == ready["effective_floor"]
+        assert applied["generation"] == 1
+        assert db.retention_floor() == 0
+
+
 def test_json_types_roundtrip(tmp_path):
     db = salamander.open(str(tmp_path / "db"))
     payload = {

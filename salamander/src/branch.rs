@@ -73,13 +73,17 @@ pub struct BranchInfo {
     pub status: BranchStatus,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct BranchCatalog {
     by_id: HashMap<BranchId, BranchInfo>,
     by_name: HashMap<String, BranchId>,
 }
 
 impl BranchCatalog {
+    pub(crate) fn all(&self) -> impl Iterator<Item = &BranchInfo> {
+        self.by_id.values()
+    }
+
     pub(crate) fn rebuild(
         system_records: impl Iterator<Item = Result<OwnedStoredRecord>>,
     ) -> Result<Self> {

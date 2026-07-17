@@ -6,6 +6,83 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-07-16
+
+Physical log compaction ships. This is a minor (pre-1.0 breaking) release:
+the manifest on-disk format gains retention fields, and once an application
+runs a compaction, reads below the retention floor return the typed
+`position_unavailable` result instead of the record. Databases that never
+compact are unaffected; the floor defaults to zero and old manifests open
+unchanged.
+
+### Added
+
+- **Retention observability** — Rust and Python now expose read-only status for
+  generation/floor/head identity, proposed boundaries, blockers, consumer
+  bootstrap readiness, maintenance handles, reclaimable bytes, and pending
+  cleanup state.
+- **Retention policy selectors** — exact positions, latest-event counts,
+  timestamp cutoffs, and retained-byte targets now resolve deterministically
+  into the existing blocker-aware explicit-floor plan in Rust and Python.
+
+- **Normative retention and compaction contract** — defines the intentional
+  durable-truth boundary after retention, explicit global floors, verified
+  retention anchors, protected projection and branch coverage, consumer
+  bootstrap, idempotency horizons, read-only planning, atomic generation
+  replacement, typed unavailable results, and the failure tests that must pass
+  before physical deletion can ship. The engine still retains all log bytes.
+- **Non-destructive retention groundwork** — manifests now carry a
+  backward-compatible global floor; Rust, facade, and Python expose it;
+  historical reads below it return the stable `position_unavailable` result
+  without clamping; and `plan_retention(keep_from)` reports the effective
+  whole-segment floor, reclaimable bytes, and anchor/branch/projection/
+  consumer/open-handle blockers. Planning never changes the floor or deletes
+  files.
+- **Verified engine-core retention anchors** — Rust, the engine facade, and
+  Python can rebuild the stream and branch catalogs from verified log truth
+  and publish a versioned, checksummed anchor for an effective floor and exact
+  durable head. Reopen validates anchor identity before using it; a corrupt
+  non-authoritative anchor falls back to the complete log. Anchor creation
+  still does not advance the floor or delete segments.
+- **Authoritative projection checkpoint coverage** — creating a retention
+  anchor through the engine facade now checkpoints every registered
+  projection and promotes the exact immutable snapshot IDs into anchor format
+  v2. Planning revalidates each referenced snapshot's checksum, descriptor,
+  branch, cursor, partition count, and unique partition identity; missing or
+  corrupt coverage restores the projection bootstrap blocker.
+- **Branch and consumer retention bootstraps** — applications can register
+  opaque, checksummed checkpoints for a branch or durable consumer at the
+  planner's effective floor. Anchor format v3 carries the bytes without
+  interpreting them, rejects duplicate/mismatched/corrupt coverage, and clears
+  branch or lagging-consumer blockers only after compatible coverage is
+  promoted. Rust, the engine facade, and Python expose registration.
+- **Atomic retention apply and closed-segment reclamation** — retention plans
+  now carry opaque IDs and observed generations. `apply_retention(plan_id)`
+  rejects unknown, blocked, or stale plans; atomically commits the new floor
+  and authoritative anchor checksum in the manifest; then removes whole closed
+  segments below the floor best-effort. A failed cleanup is only a space leak,
+  while a corrupt committed anchor is rejected even if old-generation files
+  remain.
+- **Deterministic retention crash matrix** — the real-process harness now
+  aborts at seven explicit boundaries spanning anchor creation, manifest
+  publication, partial deletion, and completed cleanup. Every recovery must be
+  wholly old or wholly new, then passes replay, branch, projection, feed,
+  expected-revision, and pre-floor idempotent-retry oracles. The nightly Linux
+  and Windows rotation includes this matrix.
+- **Complete feed bootstrap recovery** — a lagging durable feed now receives a
+  generation-bound descriptor on `position_unavailable`, including exact
+  branch/stream/type scope, checkpoint identity, codec/version, length,
+  checksum, floor, and resume continuation. Checkpoint fetch is separately
+  bounded; resume rejects stale or altered descriptors and is tested for zero
+  gaps and duplicates after physical compaction. Python exceptions expose the
+  descriptor as `exc.bootstrap` and provide fetch/resume helpers.
+- **Cross-platform and MSRV CI** — Rust and Python tests now run on Linux,
+  macOS, and Windows for every pull request, with fail-fast disabled so one
+  platform failure does not hide the others. A separate job runs the workspace
+  suite on Rust 1.90, matching the crate's declared minimum toolchain. The
+  nightly real-process crash harness now runs on both Linux and Windows through
+  one platform-neutral PowerShell loop.
+
 ## [0.1.3] — 2026-07-15
 
 ### Added
@@ -216,7 +293,8 @@ retention/compaction, network replication transport, and the swizzled
 projection store — see [ROADMAP.md](ROADMAP.md) for what is planned versus
 permanently out of scope.
 
-[Unreleased]: https://github.com/rdelprete/salamander-db/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/rdelprete/salamander-db/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/rdelprete/salamander-db/releases/tag/v0.2.0
 [0.1.3]: https://github.com/rdelprete/salamander-db/releases/tag/v0.1.3
 [0.1.2]: https://github.com/rdelprete/salamander-db/releases/tag/v0.1.2
 [0.1.1]: https://github.com/rdelprete/salamander-db/releases/tag/v0.1.1

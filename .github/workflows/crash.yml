@@ -15,11 +15,18 @@ env:
 
 jobs:
   crash-loop:
-    runs-on: ubuntu-latest
+    name: Crash harness (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release -p salamander-demo
-      - run: |
-          chmod +x scripts/crash_loop.sh
-          scripts/crash_loop.sh "${{ github.event.inputs.iterations || '200' }}"
+      - shell: pwsh
+        run: >-
+          pwsh -NoProfile -ExecutionPolicy Bypass
+          -File ./scripts/crash_loop.ps1
+          -Iterations ${{ github.event.inputs.iterations || '200' }}

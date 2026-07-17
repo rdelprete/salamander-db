@@ -372,6 +372,7 @@ fn corrupt(message: impl Into<String>) -> EngineError {
         category: ErrorCategory::Corruption,
         code: "snapshot_corrupt",
         message: message.into(),
+        feed_bootstrap: None,
     }
 }
 fn internal(message: impl Into<String>) -> EngineError {
@@ -379,6 +380,7 @@ fn internal(message: impl Into<String>) -> EngineError {
         category: ErrorCategory::Internal,
         code: "snapshot_internal",
         message: message.into(),
+        feed_bootstrap: None,
     }
 }
 fn resource(name: &str, actual: usize, maximum: usize) -> EngineError {
@@ -386,6 +388,7 @@ fn resource(name: &str, actual: usize, maximum: usize) -> EngineError {
         category: ErrorCategory::ResourceLimit,
         code: "resource_limit",
         message: format!("{name} is {actual}, maximum is {maximum}"),
+        feed_bootstrap: None,
     }
 }
 fn io_error(error: std::io::Error) -> EngineError {
@@ -393,6 +396,7 @@ fn io_error(error: std::io::Error) -> EngineError {
         category: ErrorCategory::Io,
         code: "io",
         message: error.to_string(),
+        feed_bootstrap: None,
     }
 }
 

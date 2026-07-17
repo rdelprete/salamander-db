@@ -46,4 +46,4 @@ Version 0.1 retains the complete log forever. It does not yet provide online
 compaction, selective erasure, or a supported live-backup command. Applications
 that require those properties should defer production adoption or provide an
 external, tested stop-and-copy backup procedure until the retention contract and
-operational tooling ship.
+its operational tooling are implemented.

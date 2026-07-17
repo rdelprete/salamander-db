@@ -70,6 +70,19 @@ forward-compatible).
 | `db.commit() -> int` | `commit` (fsync) |
 | `db.head() -> int` | `head` |
 | `db.uncommitted_count() -> int` | group-commit tally |
+| `db.retention_floor() -> int` | lowest position accepted by historical reads |
+| `db.retention_status(keep_from=None) -> dict` | read-only generation, floor, proposed progress, blockers, bootstrap readiness, handles, and cleanup state |
+| `db.plan_retention(keep_from) -> dict` | non-destructive floor/segment/blocker report |
+| `db.plan_retention_policy(policy, value) -> dict` | resolve `keep_from`, `keep_latest_events`, `keep_newer_than` (Unix nanoseconds), or `target_log_bytes` into the normal safe plan |
+| `db.create_retention_anchor(keep_from) -> dict` | publish a verified core anchor and promote registered-view checkpoints without deleting log data |
+| `db.apply_retention(plan_id) -> dict` | atomically commit a ready plan, advance the floor, and reclaim old closed segments |
+| `db.register_branch_bootstrap(branch, keep_from, checkpoint) -> int` | stage opaque branch state at the returned effective floor |
+| `db.register_consumer_bootstrap(consumer_id, keep_from, checkpoint) -> int` | stage opaque durable-consumer state at the returned effective floor |
+| `db.register_feed_bootstrap(consumer_id, keep_from, checkpoint, branch=, codec=, codec_version=) -> int` | stage a checkpoint bound to an exact feed scope and codec |
+| `db.fetch_feed_bootstrap(descriptor, maximum_bytes) -> bytes` | fetch and verify bounded checkpoint bytes from `PositionUnavailableError.bootstrap` |
+| `db.resume_watch(descriptor, ...) -> Watch` | resume the exact verified feed scope at the descriptor continuation |
+| `db.branch_bootstrap(branch) -> bytes | None` | retrieve the branch checkpoint promoted by the current anchor |
+| `db.consumer_bootstrap(consumer_id) -> bytes | None` | retrieve the consumer checkpoint promoted by the current anchor |
 | `db.replay(namespace, start=0, end=None) -> list[dict]` | `replay` (literal) |
 | `db.register_view(name, key, indexes={}, where_field=, where_value=)` | register an `IndexedView` |
 | `db.view(name) -> View` | typed query handle |

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Crash harness — rotate N real process kills across append, batch, snapshot,
-# and healing scenarios. Exit non-zero on any durable-truth violation.
+# healing, and retention scenarios. Exit non-zero on any durable-truth violation.
 set -euo pipefail
 
 ITERATIONS="${1:-1000}"
@@ -10,7 +10,7 @@ trap 'rm -rf "$WORKDIR"' EXIT
 
 pass=0
 fail=0
-scenarios=(append batch snapshot heal)
+scenarios=(append batch snapshot heal retention)
 
 for i in $(seq 1 "$ITERATIONS"); do
   dir="$WORKDIR/run_$i"

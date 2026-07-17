@@ -21,6 +21,16 @@ pub enum SalamanderError {
     #[error("offset {0} beyond head")]
     OffsetBeyondHead(u64),
 
+    #[error(
+        "position {requested} is unavailable: retained history starts at {floor}, head is {head}"
+    )]
+    PositionUnavailable {
+        requested: u64,
+        floor: u64,
+        head: u64,
+        bootstrap_available: bool,
+    },
+
     #[error("manifest error: {0}")]
     Manifest(String),
 

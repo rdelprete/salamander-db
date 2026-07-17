@@ -9,8 +9,10 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyBytes, PyDict, PyList};
 use salamander_db::{
     BranchDto, DiffRequestDto, DiffSideDto, DurabilityDto, Engine, EngineAppendBatch, EngineError,
-    EngineOptions, ErrorCategory, EventData, ExpectedRevisionDto, FeedFilter, FeedRequest,
+    EngineOptions, ErrorCategory, EventData, ExpectedRevisionDto, FeedBootstrapDescriptor,
+    FeedFilter, FeedRequest,
     QueryDefinition, QueryHandle, QueryOperation, RecordDto, ReplayRequest,
+    RetentionBlocker, RetentionPlan, RetentionPolicy, RetentionPolicyPreview, RetentionStatus,
 };
 use serde_json::Value;
 
@@ -34,6 +36,7 @@ create_exception!(salamander, UnsupportedFormatError, PyRuntimeError);
 create_exception!(salamander, CodecError, PyValueError);
 create_exception!(salamander, ResourceLimitError, PyValueError);
 create_exception!(salamander, CancelledError, PyRuntimeError);
+create_exception!(salamander, PositionUnavailableError, PyValueError);
 
 #[pyclass]
 struct Salamander {
@@ -154,6 +157,216 @@ impl Salamander {
     fn durable_head(&self, py: Python<'_>) -> PyResult<u64> {
         py.allow_threads(|| self.engine.durable_head())
             .map_err(to_pyerr)
+    }
+
+    fn retention_floor(&self, py: Python<'_>) -> PyResult<u64> {
+        py.allow_threads(|| self.engine.retention_floor())
+            .map_err(to_pyerr)
+    }
+
+    #[pyo3(signature = (keep_from=None))]
+    fn retention_status(
+        &self,
+        py: Python<'_>,
+        keep_from: Option<u64>,
+    ) -> PyResult<PyObject> {
+        let status = py
+            .allow_threads(|| self.engine.retention_status(keep_from))
+            .map_err(to_pyerr)?;
+        retention_status_to_py(py, &status)
+    }
+
+    fn plan_retention(&self, py: Python<'_>, keep_from: u64) -> PyResult<PyObject> {
+        let plan = py
+            .allow_threads(|| self.engine.plan_retention(keep_from))
+            .map_err(to_pyerr)?;
+        retention_plan_to_py(py, &plan)
+    }
+
+    fn plan_retention_policy(
+        &self,
+        py: Python<'_>,
+        policy: &str,
+        value: i64,
+    ) -> PyResult<PyObject> {
+        let policy = match policy {
+            "keep_from" => RetentionPolicy::KeepFrom(nonnegative_policy_value(value)?),
+            "keep_latest_events" => {
+                RetentionPolicy::KeepLatestEvents(nonnegative_policy_value(value)?)
+            }
+            "keep_newer_than" => RetentionPolicy::KeepNewerThan(value),
+            "target_log_bytes" => {
+                RetentionPolicy::TargetLogBytes(nonnegative_policy_value(value)?)
+            }
+            _ => {
+                return Err(PyValueError::new_err(
+                    "policy must be keep_from, keep_latest_events, keep_newer_than, or target_log_bytes",
+                ));
+            }
+        };
+        let preview = py
+            .allow_threads(|| self.engine.plan_retention_policy(policy))
+            .map_err(to_pyerr)?;
+        retention_policy_preview_to_py(py, &preview)
+    }
+
+    fn create_retention_anchor(&self, py: Python<'_>, keep_from: u64) -> PyResult<PyObject> {
+        let info = py
+            .allow_threads(|| self.engine.create_retention_anchor(keep_from))
+            .map_err(to_pyerr)?;
+        let out = PyDict::new(py);
+        out.set_item("format_version", info.format_version)?;
+        out.set_item("database_id", hex_id(info.database_id))?;
+        out.set_item("floor", info.floor)?;
+        out.set_item("head", info.head)?;
+        out.set_item("bytes", info.bytes)?;
+        out.set_item("checksum", info.checksum)?;
+        out.set_item("projection_checkpoints", info.projection_checkpoints)?;
+        out.set_item("branch_bootstraps", info.branch_bootstraps)?;
+        out.set_item("consumer_bootstraps", info.consumer_bootstraps)?;
+        out.set_item("bootstrap_bytes", info.bootstrap_bytes)?;
+        out.set_item("system_records", info.system_records)?;
+        Ok(out.into_any().unbind())
+    }
+
+    fn apply_retention(&self, py: Python<'_>, plan_id: &str) -> PyResult<PyObject> {
+        let plan_id = parse_hex_id(plan_id)?;
+        let applied = py
+            .allow_threads(|| self.engine.apply_retention(plan_id))
+            .map_err(to_pyerr)?;
+        let out = PyDict::new(py);
+        out.set_item("generation", applied.generation)?;
+        out.set_item("floor", applied.floor)?;
+        out.set_item("reclaimed_bytes", applied.reclaimed_bytes)?;
+        Ok(out.into_any().unbind())
+    }
+
+    fn register_branch_bootstrap(
+        &self,
+        py: Python<'_>,
+        branch: &str,
+        keep_from: u64,
+        checkpoint: &[u8],
+    ) -> PyResult<u64> {
+        let branch = py
+            .allow_threads(|| self.engine.branch_named(branch.to_string()))
+            .map_err(to_pyerr)?;
+        py.allow_threads(|| {
+            self.engine
+                .register_branch_bootstrap(branch.id, keep_from, checkpoint.to_vec())
+        })
+        .map_err(to_pyerr)
+    }
+
+    fn register_consumer_bootstrap(
+        &self,
+        py: Python<'_>,
+        consumer_id: &str,
+        keep_from: u64,
+        checkpoint: &[u8],
+    ) -> PyResult<u64> {
+        py.allow_threads(|| {
+            self.engine.register_consumer_bootstrap(
+                consumer_id.to_string(),
+                keep_from,
+                checkpoint.to_vec(),
+            )
+        })
+        .map_err(to_pyerr)
+    }
+
+    #[pyo3(signature = (consumer_id, keep_from, checkpoint, branch=None, codec="opaque", codec_version=1))]
+    #[allow(clippy::too_many_arguments)]
+    fn register_feed_bootstrap(
+        &self,
+        py: Python<'_>,
+        consumer_id: &str,
+        keep_from: u64,
+        checkpoint: &[u8],
+        branch: Option<&str>,
+        codec: &str,
+        codec_version: u32,
+    ) -> PyResult<u64> {
+        let branches = match branch {
+            Some(name) => vec![py
+                .allow_threads(|| self.engine.branch_named(name.to_string()))
+                .map_err(to_pyerr)?
+                .id],
+            None => Vec::new(),
+        };
+        py.allow_threads(|| {
+            self.engine.register_consumer_bootstrap_for_feed_with_codec(
+                consumer_id.to_string(),
+                keep_from,
+                FeedFilter {
+                    branches,
+                    ..FeedFilter::default()
+                },
+                codec.to_string(),
+                codec_version,
+                checkpoint.to_vec(),
+            )
+        })
+        .map_err(to_pyerr)
+    }
+
+    fn fetch_feed_bootstrap(
+        &self,
+        py: Python<'_>,
+        descriptor: &Bound<'_, PyDict>,
+        maximum_bytes: usize,
+    ) -> PyResult<Py<PyBytes>> {
+        let descriptor = feed_bootstrap_from_py(descriptor)?;
+        let bytes = py
+            .allow_threads(|| self.engine.fetch_feed_bootstrap(descriptor, maximum_bytes))
+            .map_err(to_pyerr)?;
+        Ok(PyBytes::new(py, &bytes).unbind())
+    }
+
+    #[pyo3(signature = (descriptor, namespace=None, timeout=None, page_batches=128, page_bytes=1048576))]
+    fn resume_watch(
+        &self,
+        py: Python<'_>,
+        descriptor: &Bound<'_, PyDict>,
+        namespace: Option<String>,
+        timeout: Option<f64>,
+        page_batches: u32,
+        page_bytes: usize,
+    ) -> PyResult<Watch> {
+        let descriptor = feed_bootstrap_from_py(descriptor)?;
+        let handle = py
+            .allow_threads(|| self.engine.resume_feed(descriptor, page_batches, page_bytes))
+            .map_err(to_pyerr)?;
+        Ok(Watch {
+            engine: self.engine.clone(),
+            handle: Some(handle),
+            namespace,
+            timeout_millis: timeout.map(|seconds| (seconds * 1000.0).max(0.0) as u64),
+            buffer: VecDeque::new(),
+        })
+    }
+
+    fn branch_bootstrap(
+        &self,
+        py: Python<'_>,
+        branch: &str,
+    ) -> PyResult<Option<Py<PyBytes>>> {
+        let branch = py
+            .allow_threads(|| self.engine.branch_named(branch.to_string()))
+            .map_err(to_pyerr)?;
+        py.allow_threads(|| self.engine.branch_bootstrap(branch.id))
+            .map_err(to_pyerr)
+            .map(|value| value.map(|bytes| PyBytes::new(py, &bytes).unbind()))
+    }
+
+    fn consumer_bootstrap(
+        &self,
+        py: Python<'_>,
+        consumer_id: &str,
+    ) -> PyResult<Option<Py<PyBytes>>> {
+        py.allow_threads(|| self.engine.consumer_bootstrap(consumer_id.to_string()))
+            .map_err(to_pyerr)
+            .map(|value| value.map(|bytes| PyBytes::new(py, &bytes).unbind()))
     }
 
     fn uncommitted_count(&self, py: Python<'_>) -> PyResult<u64> {
@@ -1018,7 +1231,20 @@ fn hex_id(id: [u8; 16]) -> String {
     id.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+#[allow(deprecated)]
 fn to_pyerr(error: EngineError) -> PyErr {
+    if error.code == "position_unavailable" {
+        let exception = PositionUnavailableError::new_err(error.to_string());
+        Python::with_gil(|py| {
+            let value = error
+                .feed_bootstrap
+                .as_deref()
+                .and_then(|descriptor| feed_bootstrap_to_py(py, descriptor).ok())
+                .unwrap_or_else(|| py.None());
+            let _ = exception.value(py).setattr("bootstrap", value);
+        });
+        return exception;
+    }
     match error.category {
         ErrorCategory::InvalidArgument => InvalidArgumentError::new_err(error.to_string()),
         ErrorCategory::Conflict => ConflictError::new_err(error.to_string()),
@@ -1032,6 +1258,79 @@ fn to_pyerr(error: EngineError) -> PyErr {
         ErrorCategory::ResourceLimit => ResourceLimitError::new_err(error.to_string()),
         ErrorCategory::Internal => SalamanderError::new_err(error.to_string()),
     }
+}
+
+fn feed_bootstrap_to_py(
+    py: Python<'_>,
+    descriptor: &FeedBootstrapDescriptor,
+) -> PyResult<PyObject> {
+    let out = PyDict::new(py);
+    out.set_item("database_id", hex_id(descriptor.database_id))?;
+    out.set_item("generation", descriptor.generation)?;
+    out.set_item("floor", descriptor.floor)?;
+    out.set_item("consumer_id", &descriptor.consumer_id)?;
+    out.set_item("checkpoint_id", hex_id(descriptor.checkpoint_id))?;
+    out.set_item(
+        "branches",
+        descriptor
+            .scope
+            .branches
+            .iter()
+            .copied()
+            .map(hex_id)
+            .collect::<Vec<_>>(),
+    )?;
+    out.set_item(
+        "streams",
+        descriptor
+            .scope
+            .streams
+            .iter()
+            .copied()
+            .map(hex_id)
+            .collect::<Vec<_>>(),
+    )?;
+    out.set_item("event_types", &descriptor.scope.event_types)?;
+    out.set_item("byte_length", descriptor.byte_length)?;
+    out.set_item("checksum", descriptor.checksum)?;
+    out.set_item("resume_from", descriptor.resume_from)?;
+    out.set_item("codec", &descriptor.codec)?;
+    out.set_item("codec_version", descriptor.codec_version)?;
+    Ok(out.into_any().unbind())
+}
+
+fn feed_bootstrap_from_py(
+    value: &Bound<'_, PyDict>,
+) -> PyResult<FeedBootstrapDescriptor> {
+    let required = |name: &str| {
+        value
+            .get_item(name)?
+            .ok_or_else(|| PyValueError::new_err(format!("missing bootstrap field {name}")))
+    };
+    let parse_ids = |name: &str| -> PyResult<Vec<[u8; 16]>> {
+        required(name)?
+            .extract::<Vec<String>>()?
+            .iter()
+            .map(|id| parse_hex_id(id))
+            .collect()
+    };
+    Ok(FeedBootstrapDescriptor {
+        database_id: parse_hex_id(&required("database_id")?.extract::<String>()?)?,
+        generation: required("generation")?.extract()?,
+        floor: required("floor")?.extract()?,
+        consumer_id: required("consumer_id")?.extract()?,
+        checkpoint_id: parse_hex_id(&required("checkpoint_id")?.extract::<String>()?)?,
+        scope: salamander_db::RetentionFeedScope {
+            branches: parse_ids("branches")?,
+            streams: parse_ids("streams")?,
+            event_types: required("event_types")?.extract()?,
+        },
+        byte_length: required("byte_length")?.extract()?,
+        checksum: required("checksum")?.extract()?,
+        resume_from: required("resume_from")?.extract()?,
+        codec: required("codec")?.extract()?,
+        codec_version: required("codec_version")?.extract()?,
+    })
 }
 
 fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
@@ -1110,6 +1409,139 @@ fn value_to_py(py: Python<'_>, value: &Value) -> PyResult<PyObject> {
     })
 }
 
+fn retention_plan_to_py(py: Python<'_>, plan: &RetentionPlan) -> PyResult<PyObject> {
+    let out = PyDict::new(py);
+    out.set_item("plan_id", hex_id(plan.plan_id))?;
+    out.set_item("generation", plan.generation)?;
+    out.set_item("requested_floor", plan.requested_floor)?;
+    out.set_item("effective_floor", plan.effective_floor)?;
+    out.set_item("current_floor", plan.current_floor)?;
+    out.set_item("durable_head", plan.durable_head)?;
+    out.set_item("reclaimable_bytes", plan.reclaimable_bytes)?;
+    let segments = PyList::empty(py);
+    for segment in &plan.reclaimable_segments {
+        let item = PyDict::new(py);
+        item.set_item("base_position", segment.base_position)?;
+        item.set_item("bytes", segment.bytes)?;
+        segments.append(item)?;
+    }
+    out.set_item("reclaimable_segments", segments)?;
+    out.set_item("blockers", retention_blockers_to_py(py, &plan.blockers)?)?;
+    Ok(out.into_any().unbind())
+}
+
+fn nonnegative_policy_value(value: i64) -> PyResult<u64> {
+    u64::try_from(value).map_err(|_| PyValueError::new_err("policy value must be non-negative"))
+}
+
+fn retention_policy_preview_to_py(
+    py: Python<'_>,
+    preview: &RetentionPolicyPreview,
+) -> PyResult<PyObject> {
+    let out = PyDict::new(py);
+    let (kind, value) = match preview.policy {
+        RetentionPolicy::KeepFrom(value) => ("keep_from", value as i128),
+        RetentionPolicy::KeepLatestEvents(value) => ("keep_latest_events", value as i128),
+        RetentionPolicy::KeepNewerThan(value) => ("keep_newer_than", value as i128),
+        RetentionPolicy::TargetLogBytes(value) => ("target_log_bytes", value as i128),
+    };
+    out.set_item("policy", kind)?;
+    out.set_item("value", value)?;
+    out.set_item("selected_floor", preview.selected_floor)?;
+    out.set_item("target_satisfied", preview.target_satisfied)?;
+    out.set_item("explanation", &preview.explanation)?;
+    out.set_item("plan", retention_plan_to_py(py, &preview.plan)?)?;
+    Ok(out.into_any().unbind())
+}
+
+fn retention_blockers_to_py<'py>(
+    py: Python<'py>,
+    values: &[RetentionBlocker],
+) -> PyResult<Bound<'py, PyList>> {
+    let blockers = PyList::empty(py);
+    for blocker in values {
+        let item = PyDict::new(py);
+        match blocker {
+            RetentionBlocker::EngineAnchorUnavailable => {
+                item.set_item("kind", "engine_anchor_unavailable")?;
+            }
+            RetentionBlocker::BranchRequiresBootstrap {
+                branch,
+                fork_position,
+            } => {
+                item.set_item("kind", "branch_requires_bootstrap")?;
+                item.set_item("branch", branch.as_str())?;
+                item.set_item("fork_position", fork_position)?;
+            }
+            RetentionBlocker::ProjectionRequiresBootstrap { name } => {
+                item.set_item("kind", "projection_requires_bootstrap")?;
+                item.set_item("name", name)?;
+            }
+            RetentionBlocker::ConsumerRequiresBootstrap {
+                consumer_id,
+                position,
+            } => {
+                item.set_item("kind", "consumer_requires_bootstrap")?;
+                item.set_item("consumer_id", consumer_id)?;
+                item.set_item("position", position)?;
+            }
+            RetentionBlocker::MaintenanceHandlesOpen { readers, feeds } => {
+                item.set_item("kind", "maintenance_handles_open")?;
+                item.set_item("readers", readers)?;
+                item.set_item("feeds", feeds)?;
+            }
+        }
+        blockers.append(item)?;
+    }
+    Ok(blockers)
+}
+
+fn retention_status_to_py(py: Python<'_>, status: &RetentionStatus) -> PyResult<PyObject> {
+    let out = PyDict::new(py);
+    out.set_item("database_id", hex_id(status.database_id))?;
+    out.set_item("generation", status.generation)?;
+    out.set_item("floor", status.floor)?;
+    out.set_item("durable_head", status.durable_head)?;
+    out.set_item("requested_floor", status.requested_floor)?;
+    out.set_item("effective_floor", status.effective_floor)?;
+    out.set_item("anchor_ready", status.anchor_ready)?;
+    out.set_item("reclaimable_bytes", status.reclaimable_bytes)?;
+    let reclaimable = PyList::empty(py);
+    for segment in &status.reclaimable_segments {
+        let item = PyDict::new(py);
+        item.set_item("base_position", segment.base_position)?;
+        item.set_item("bytes", segment.bytes)?;
+        reclaimable.append(item)?;
+    }
+    out.set_item("reclaimable_segments", reclaimable)?;
+    out.set_item("blockers", retention_blockers_to_py(py, &status.blockers)?)?;
+    out.set_item("open_readers", status.open_readers)?;
+    out.set_item("open_feeds", status.open_feeds)?;
+    let consumers = PyList::empty(py);
+    for consumer in &status.consumers {
+        let item = PyDict::new(py);
+        item.set_item("consumer_id", &consumer.consumer_id)?;
+        item.set_item("position", consumer.position)?;
+        item.set_item("behind_effective_floor", consumer.behind_effective_floor)?;
+        item.set_item("bootstrap_available", consumer.bootstrap_available)?;
+        consumers.append(item)?;
+    }
+    out.set_item("consumers", consumers)?;
+    let cleanup = PyDict::new(py);
+    cleanup.set_item("complete", status.cleanup.pending_segments.is_empty())?;
+    cleanup.set_item("pending_bytes", status.cleanup.pending_bytes)?;
+    let pending = PyList::empty(py);
+    for segment in &status.cleanup.pending_segments {
+        let item = PyDict::new(py);
+        item.set_item("base_position", segment.base_position)?;
+        item.set_item("bytes", segment.bytes)?;
+        pending.append(item)?;
+    }
+    cleanup.set_item("pending_segments", pending)?;
+    out.set_item("cleanup", cleanup)?;
+    Ok(out.into_any().unbind())
+}
+
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 #[pyo3(signature = (path, commit_every_bytes=None, commit_every_count=None, commit_every_millis=None, snapshot_every_events=None, snapshot_every_bytes=None, snapshot_every_millis=None))]
@@ -1162,6 +1594,10 @@ fn salamander(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.py().get_type::<ResourceLimitError>(),
     )?;
     m.add("CancelledError", m.py().get_type::<CancelledError>())?;
+    m.add(
+        "PositionUnavailableError",
+        m.py().get_type::<PositionUnavailableError>(),
+    )?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

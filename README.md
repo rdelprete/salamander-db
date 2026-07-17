@@ -57,9 +57,25 @@ pickle checkpoint files.
 | Rebuildable projections over immutable events | Built-in semantic search, embeddings, or memory selection |
 | A Rust library or native Python extension with no server | A managed, network-accessible database service |
 
-The complete log is currently retained forever. Retention and compaction are
-planned but not available in v0.1; workloads with deletion or bounded-storage
-requirements should account for that before adopting it.
+Retention is an explicit manual workflow: plan an effective whole-segment
+floor, resolve every reported blocker, create a verified anchor, request a new
+plan, and apply its opaque plan ID. Apply atomically advances the floor before
+reclaiming old closed segments; historical reads below that floor return
+`position_unavailable`. This is retention, not guaranteed secure erasure.
+Lagging durable feeds receive a scoped bootstrap descriptor, fetch checkpoint
+bytes separately under an explicit size bound, restore application state, and
+resume from the descriptor continuation without gaps or duplicates.
+Call `retention_status` (Python) or `Engine::retention_status` (Rust facade)
+for a read-only view of the current generation, floor and durable head; the
+proposed whole-segment boundary; blockers and consumer bootstrap coverage;
+open maintenance handles; reclaimable bytes; and files awaiting best-effort
+cleanup. Omitting the proposed floor evaluates retention at the durable head.
+Policy planning accepts an exact position, a latest-event count, a Unix-
+nanosecond cutoff, or a retained-log byte target. Every selector resolves to
+the same explicit-floor plan and therefore cannot bypass rounding, blockers,
+bootstrap coverage, anchor verification, or stale-plan rejection. Byte-target
+previews report `target_satisfied = false` when the active segment alone is
+larger than the requested target.
 
 ## Quick start
 
@@ -296,11 +312,12 @@ golden-fixture, and integration tests) and a `kill -9` crash harness; see
 
 **What's next** — the crate is on
 [crates.io](https://crates.io/crates/salamander-db) and wheels are on
-[PyPI](https://pypi.org/project/salamander-db/); the remaining release
-engineering is a CI test matrix beyond Linux plus an MSRV job. Then
-background healing, a retention contract, replication adapters, and an MCP
-server. Permanently out of scope: multi-writer shared state across
-services. See [ROADMAP.md](ROADMAP.md).
+[PyPI](https://pypi.org/project/salamander-db/). CI tests Rust and Python on
+Linux, macOS, and Windows and verifies the declared Rust 1.90 minimum. The
+next product work is background healing, richer retention policy and feed
+bootstrap ergonomics, replication adapters, and an MCP server.
+Permanently out of scope: multi-writer shared state across services. See
+[ROADMAP.md](ROADMAP.md).
 
 ## Documentation
 
@@ -311,6 +328,7 @@ services. See [ROADMAP.md](ROADMAP.md).
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Ground rules, the CI gates, and how to propose changes |
 | [Python usage guide](docs/python-usage.md) | Lifecycle, streaming, async applications, typing, and API discovery |
 | [Upgrade guide](docs/upgrading.md) | Versioning, on-disk compatibility, backups, and pre-1.0 upgrades |
+| [Retention/compaction contract](docs/specs/retention-compaction.md) | Normative floors, anchors, blockers, recovery, and bootstrap semantics |
 | [salamander/examples/](salamander/examples) | Runnable, commented Rust examples for every core operation |
 | [examples/py/](examples/py) | Python examples, including the LangGraph checkpointer |
 

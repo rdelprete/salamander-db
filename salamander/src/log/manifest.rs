@@ -41,6 +41,16 @@ pub struct Manifest {
     #[serde(default = "default_payload_format_version")]
     pub payload_format_version: u32,
     pub active_segment_base: u64,
+    /// Lowest user-event position available through public history APIs.
+    /// Databases created before retention support default to zero.
+    #[serde(default)]
+    pub retention_floor: u64,
+    /// Monotonic generation advanced by each committed retention operation.
+    #[serde(default)]
+    pub retention_generation: u64,
+    /// Checksum of the authoritative anchor for `retention_floor`.
+    #[serde(default)]
+    pub retention_anchor_checksum: Option<u32>,
     /// Advisory / diagnostic only. `Log::open` never trusts this value —
     /// it always re-derives the true next offset by scanning the active
     /// segment, which *must* win: after a torn-tail truncation (DESIGN.md

@@ -19,6 +19,45 @@ class ReplayPage(TypedDict):
     continuation: int
     done: bool
 
+class FeedBootstrap(TypedDict):
+    database_id: str
+    generation: int
+    floor: int
+    consumer_id: str
+    checkpoint_id: str
+    branches: List[str]
+    streams: List[str]
+    event_types: List[str]
+    byte_length: int
+    checksum: int
+    resume_from: int
+    codec: str
+    codec_version: int
+
+class RetentionStatus(TypedDict):
+    database_id: str
+    generation: int
+    floor: int
+    durable_head: int
+    requested_floor: int
+    effective_floor: int
+    anchor_ready: bool
+    reclaimable_bytes: int
+    reclaimable_segments: List[Dict[str, int]]
+    blockers: List[Dict[str, Any]]
+    open_readers: int
+    open_feeds: int
+    consumers: List[Dict[str, Any]]
+    cleanup: Dict[str, Any]
+
+class RetentionPolicyPreview(TypedDict):
+    policy: str
+    value: int
+    selected_floor: int
+    target_satisfied: bool
+    explanation: str
+    plan: Dict[str, Any]
+
 class SalamanderError(RuntimeError): ...
 class InvalidArgumentError(ValueError): ...
 class ConflictError(ValueError): ...
@@ -30,6 +69,8 @@ class UnsupportedFormatError(RuntimeError): ...
 class CodecError(ValueError): ...
 class ResourceLimitError(ValueError): ...
 class CancelledError(RuntimeError): ...
+class PositionUnavailableError(ValueError):
+    bootstrap: Optional[FeedBootstrap]
 
 class Reader:
     def next_page(self) -> ReplayPage: ...
@@ -64,6 +105,40 @@ class Salamander:
     def commit(self) -> int: ...
     def head(self) -> int: ...
     def durable_head(self) -> int: ...
+    def retention_floor(self) -> int: ...
+    def retention_status(self, keep_from: Optional[int] = ...) -> RetentionStatus: ...
+    def plan_retention(self, keep_from: int) -> Dict[str, Any]: ...
+    def plan_retention_policy(self, policy: str, value: int) -> RetentionPolicyPreview: ...
+    def create_retention_anchor(self, keep_from: int) -> Dict[str, Any]: ...
+    def apply_retention(self, plan_id: str) -> Dict[str, int]: ...
+    def register_branch_bootstrap(
+        self, branch: str, keep_from: int, checkpoint: bytes
+    ) -> int: ...
+    def register_consumer_bootstrap(
+        self, consumer_id: str, keep_from: int, checkpoint: bytes
+    ) -> int: ...
+    def register_feed_bootstrap(
+        self,
+        consumer_id: str,
+        keep_from: int,
+        checkpoint: bytes,
+        branch: Optional[str] = ...,
+        codec: str = ...,
+        codec_version: int = ...,
+    ) -> int: ...
+    def fetch_feed_bootstrap(
+        self, descriptor: FeedBootstrap, maximum_bytes: int
+    ) -> bytes: ...
+    def resume_watch(
+        self,
+        descriptor: FeedBootstrap,
+        namespace: Optional[str] = ...,
+        timeout: Optional[float] = ...,
+        page_batches: int = ...,
+        page_bytes: int = ...,
+    ) -> Watch: ...
+    def branch_bootstrap(self, branch: str) -> Optional[bytes]: ...
+    def consumer_bootstrap(self, consumer_id: str) -> Optional[bytes]: ...
     def uncommitted_count(self) -> int: ...
     def replay(self, namespace: str, start: int = ..., end: Optional[int] = ...) -> List[EventRow]: ...
     def open_reader(self, namespace: str, start: int = ..., end: Optional[int] = ..., page_events: int = ..., page_bytes: int = ...) -> Reader: ...

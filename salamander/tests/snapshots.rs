@@ -3,7 +3,7 @@ use std::fs;
 
 use salamander::{
     DurabilityDto, Engine, EngineAppendBatch, EngineOptions, EventData, ExpectedRevisionDto,
-    QueryDefinition, QueryOperation,
+    QueryDefinition, QueryOperation, RetentionBlocker,
 };
 
 fn event(index: u64) -> EngineAppendBatch {
@@ -31,6 +31,67 @@ fn register(engine: &Engine) -> salamander::QueryHandle {
     engine
         .register_query("rows".into(), definition("id"))
         .unwrap()
+}
+
+#[test]
+fn retention_anchor_promotes_and_revalidates_projection_checkpoints() {
+    let dir = tempfile::tempdir().unwrap();
+    let snapshot_id = {
+        let engine = Engine::open(EngineOptions::new(dir.path())).unwrap();
+        let handle = register(&engine);
+        engine.append(event(0)).unwrap();
+        assert_eq!(engine.query(handle, QueryOperation::Len).unwrap().len, 1);
+
+        let before = engine
+            .plan_retention(engine.durable_head().unwrap())
+            .unwrap();
+        assert!(before.blockers.iter().any(|blocker| matches!(
+            blocker,
+            RetentionBlocker::ProjectionRequiresBootstrap { name } if name == "rows"
+        )));
+        let anchor = engine
+            .create_retention_anchor(engine.durable_head().unwrap())
+            .unwrap();
+        assert_eq!(anchor.projection_checkpoints, 1);
+        let after = engine
+            .plan_retention(engine.durable_head().unwrap())
+            .unwrap();
+        assert!(!after.blockers.iter().any(|blocker| matches!(
+            blocker,
+            RetentionBlocker::ProjectionRequiresBootstrap { name } if name == "rows"
+        )));
+        let id = engine.list_snapshots(handle).unwrap()[0].id.clone();
+        engine.close().unwrap();
+        id
+    };
+
+    let engine = Engine::open(EngineOptions::new(dir.path())).unwrap();
+    assert!(!engine
+        .plan_retention(engine.durable_head().unwrap())
+        .unwrap()
+        .blockers
+        .iter()
+        .any(|blocker| matches!(
+            blocker,
+            RetentionBlocker::ProjectionRequiresBootstrap { name } if name == "rows"
+        )));
+    engine.close().unwrap();
+
+    fs::write(
+        dir.path().join("derived/snapshots").join(snapshot_id),
+        b"corrupt promoted checkpoint",
+    )
+    .unwrap();
+    let engine = Engine::open(EngineOptions::new(dir.path())).unwrap();
+    assert!(engine
+        .plan_retention(engine.durable_head().unwrap())
+        .unwrap()
+        .blockers
+        .iter()
+        .any(|blocker| matches!(
+            blocker,
+            RetentionBlocker::ProjectionRequiresBootstrap { name } if name == "rows"
+        )));
 }
 
 #[test]

@@ -7,7 +7,7 @@ snapshots, the commit feed, and instant recovery — and the first public
 releases are out: `salamander-db` on
 [crates.io](https://crates.io/crates/salamander-db) and Python wheels on
 [PyPI](https://pypi.org/project/salamander-db/), tagged `v0.1.0` through
-`v0.1.3`. See [CHANGELOG.md](CHANGELOG.md) for the full feature inventory.
+`v0.2.0`. See [CHANGELOG.md](CHANGELOG.md) for the full feature inventory.
 
 This file is direction, not commitment: unreleased items may change or be
 dropped.
@@ -18,11 +18,9 @@ The release engineering formerly listed here as "v0.1.0 — first public
 release" is done: public API audit with rustdoc on every public item
 (`#![warn(missing_docs)]`), the crate published to crates.io via Trusted
 Publishing, and abi3 Python wheels on PyPI built by maturin CI for
-Linux/macOS/Windows. Still open from that list:
+Linux/macOS/Windows. Rust and Python tests now run on all three platforms,
+and CI verifies the declared Rust 1.90 minimum. Still open from that list:
 
-- CI *test* matrix across Linux/macOS/Windows plus an MSRV job, so the
-  durability platform matrix in the contracts is backed by tested platforms
-  (tests currently run on Linux; wheels build on all three).
 - Demo assets: session-demo and playground recordings for the README (the
   dungeon demo video shipped with v0.1.2).
 
@@ -44,11 +42,25 @@ Ordered roughly by how directly each builds on shipped seams:
   seam in place but disabled — cold partitions heal on first read only.
   Turning it on (idle-time healing, oldest-snapshot-first) is a performance
   feature that must never change an answer.
-- **Retention and compaction.** Today the complete log is retained forever —
-  that is what makes every derived structure disposable. A ratified
-  retention contract comes before any byte is deleted; the commit feed
-  already reserves the `PositionUnavailable` response and a
-  bootstrap-from-snapshot protocol for this.
+- **Retention and compaction — explicit-floor path shipped.**
+  Persistent floors, typed
+  unavailable errors, and non-destructive blocker-aware planning implement
+  phases 1–2 of the normative
+  [retention/compaction contract](docs/specs/retention-compaction.md). The
+  engine can now publish and validate the phase-3 stream/branch core anchor,
+  and facade projections can promote verified partition checkpoints into
+  anchor format v2. Anchor format v3 also promotes opaque branch and durable
+  consumer bootstraps at the effective floor. Atomic apply now binds the
+  manifest generation to the anchor checksum before reclaiming whole closed
+  segments. Protected-versus-disposable projection policy, consumer
+  abandonment and richer plan diagnostics remain future work. Lagging feeds
+  now have a scoped descriptor/fetch/resume bootstrap workflow. A deterministic
+  seven-boundary retention crash matrix now runs in the Linux and Windows
+  nightly rotation. Operators can inspect a read-only status surface covering
+  identity, proposed progress, blockers, bootstrap readiness, open handles,
+  reclaimable storage, and best-effort cleanup progress from Rust or Python.
+  Exact-position, latest-event, timestamp-cutoff, and retained-byte policies
+  now select positions without weakening the explicit-floor safety path.
 - **Replication adapters.** The committed-batch feed is the replication
   seam: follower ingestion keyed by original event/batch identity is
   idempotent by construction. Adapters (file shipping, object storage, HTTP)

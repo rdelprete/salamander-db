@@ -1,6 +1,6 @@
 [package]
 name = "salamander-py"
-version = "0.1.3"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 description = "Python bindings for salamander-db — SQLite for event-sourced state."
@@ -15,7 +15,7 @@ crate-type = ["cdylib"]
 [dependencies]
 # path for local builds; version so a published sdist resolves salamander-db
 # from crates.io (maturin rewrites the path away in the sdist).
-salamander_db = { package = "salamander-db", path = "../salamander", version = "0.1" }
+salamander_db = { package = "salamander-db", path = "../salamander", version = "0.2" }
 serde_json = "1"
 
 [dependencies.pyo3]

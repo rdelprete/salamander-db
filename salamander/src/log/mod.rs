@@ -181,6 +181,12 @@ impl Log {
         // doc comment, review M-4). Overwrite it with the scanned truth.
         let mut manifest = manifest;
         manifest.next_offset = active.next_offset();
+        if manifest.retention_floor > manifest.next_offset {
+            return Err(SalamanderError::Manifest(format!(
+                "retention floor {} is beyond head {}",
+                manifest.retention_floor, manifest.next_offset
+            )));
+        }
 
         Ok(Log {
             dir: dir.to_path_buf(),
@@ -230,6 +236,122 @@ impl Log {
 
     pub fn head(&self) -> u64 {
         self.active.next_offset()
+    }
+
+    pub fn retention_floor(&self) -> u64 {
+        self.manifest.retention_floor
+    }
+
+    pub(crate) fn retention_generation(&self) -> u64 {
+        self.manifest.retention_generation
+    }
+
+    pub(crate) fn retention_anchor_checksum(&self) -> Option<u32> {
+        self.manifest.retention_anchor_checksum
+    }
+
+    pub(crate) fn activate_retention(&mut self, floor: u64, checksum: u32) -> Result<()> {
+        if floor < self.retention_floor() || floor > self.head() {
+            return Err(SalamanderError::InvalidArgument(format!(
+                "invalid retention floor {floor} for current floor {} and head {}",
+                self.retention_floor(),
+                self.head()
+            )));
+        }
+        let mut manifest = self.manifest.clone();
+        manifest.retention_floor = floor;
+        manifest.retention_generation = manifest.retention_generation.saturating_add(1);
+        manifest.retention_anchor_checksum = Some(checksum);
+        manifest.next_offset = self.head();
+        manifest.write(&self.dir)?;
+        self.manifest = manifest;
+        Ok(())
+    }
+
+    pub(crate) fn reclaim_below_retention_floor(&mut self) -> u64 {
+        let floor = self.retention_floor();
+        let mut reclaimed = 0u64;
+        self.closed.retain(|segment| {
+            if segment.base_offset >= floor {
+                return true;
+            }
+            let bytes = std::fs::metadata(&segment.path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            match std::fs::remove_file(&segment.path) {
+                Ok(()) => {
+                    reclaimed = reclaimed.saturating_add(bytes);
+                    crate::retention::crash_point("during_cleanup");
+                    false
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(_) => true,
+            }
+        });
+        self.sidecars.borrow_mut().retain(|base, _| *base >= floor);
+        reclaimed
+    }
+
+    pub(crate) fn has_complete_prefix(&self) -> bool {
+        self.closed.first().map_or_else(
+            || self.active.base_offset() == 0,
+            |segment| segment.base_offset == 0,
+        )
+    }
+
+    pub(crate) fn retention_boundary(&self, requested: u64) -> (u64, Vec<(u64, u64)>) {
+        let mut bases: Vec<u64> = self
+            .closed
+            .iter()
+            .map(|segment| segment.base_offset)
+            .collect();
+        bases.push(self.active.base_offset());
+        let effective = bases
+            .iter()
+            .copied()
+            .filter(|base| *base <= requested)
+            .max()
+            .unwrap_or(self.retention_floor())
+            .max(self.retention_floor());
+        let reclaimable = self
+            .closed
+            .iter()
+            .filter(|segment| segment.base_offset < effective)
+            .filter_map(|segment| {
+                std::fs::metadata(&segment.path)
+                    .ok()
+                    .map(|metadata| (segment.base_offset, metadata.len()))
+            })
+            .collect();
+        (effective, reclaimable)
+    }
+
+    pub(crate) fn retention_floor_for_bytes(&self, target_bytes: u64) -> Result<(u64, u64, bool)> {
+        let mut segments = Vec::new();
+        for segment in self
+            .closed
+            .iter()
+            .filter(|segment| segment.base_offset >= self.retention_floor())
+        {
+            segments.push((segment.base_offset, std::fs::metadata(&segment.path)?.len()));
+        }
+        let active_bytes = self.active.len_bytes();
+        segments.push((self.active.base_offset(), active_bytes));
+        segments.sort_unstable_by_key(|(base, _)| *base);
+        let mut retained = segments.iter().map(|(_, bytes)| *bytes).sum::<u64>();
+        for (base, bytes) in &segments {
+            if retained <= target_bytes {
+                return Ok((*base, retained, true));
+            }
+            if *base != self.active.base_offset() {
+                retained = retained.saturating_sub(*bytes);
+            }
+        }
+        Ok((
+            self.active.base_offset(),
+            active_bytes,
+            active_bytes <= target_bytes,
+        ))
     }
 
     pub fn database_id(&self) -> DatabaseId {
@@ -443,6 +565,9 @@ fn bootstrap_manifest(dir: &Path, segs_dir: &Path) -> Result<Manifest> {
         database_id: generate_id_bytes(),
         payload_format_version: manifest::PAYLOAD_FORMAT_VERSION,
         active_segment_base: active_base,
+        retention_floor: 0,
+        retention_generation: 0,
+        retention_anchor_checksum: None,
         next_offset: active_base,
     };
     manifest.write(dir)?;
@@ -1146,5 +1271,32 @@ mod tests {
         assert_eq!(log.head(), 1);
         let records = payloads_from(&log, 0);
         assert_eq!(records, vec![(0, b"real".to_vec())]);
+    }
+
+    #[test]
+    fn retention_planning_rounds_down_and_reports_only_closed_segments() {
+        let dir = tempdir().unwrap();
+        let mut log = Log::open_with_segment_max_bytes(dir.path(), 64).unwrap();
+        log.append(&[1; 128]).unwrap();
+        log.append(&[2; 128]).unwrap();
+        log.append(&[3; 128]).unwrap();
+        log.commit().unwrap();
+
+        let (effective, segments) = log.retention_boundary(2);
+        assert_eq!(effective, 2);
+        assert_eq!(
+            segments
+                .iter()
+                .map(|(base, _bytes)| *base)
+                .collect::<Vec<_>>(),
+            [0, 1]
+        );
+        assert!(segments.iter().all(|(_, bytes)| *bytes > 0));
+
+        // A position inside the current segment never makes that active
+        // segment reclaimable.
+        let (effective, segments) = log.retention_boundary(log.head());
+        assert_eq!(effective, 2);
+        assert_eq!(segments.len(), 2);
     }
 }
